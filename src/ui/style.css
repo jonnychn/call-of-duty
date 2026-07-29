@@ -1,0 +1,156 @@
+@font-face { font-family: 'HUD'; src: local('Bahnschrift'), local('DIN Alternate'), local('Roboto Condensed'); }
+
+:root {
+  --hud: #e8eef2;
+  --hud-dim: rgba(232, 238, 242, 0.55);
+  --accent: #ff8c2b;
+  --danger: #ff3b30;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #06080a;
+  color: var(--hud);
+  font-family: 'HUD', 'Bahnschrift', 'DIN Alternate', 'Roboto Condensed', 'Arial Narrow', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+}
+
+#game { display: block; width: 100%; height: 100%; }
+
+#ui-root {
+  position: fixed; inset: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ------------------------------- crosshair ------------------------------- */
+.crosshair {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 64px; height: 64px;
+}
+.crosshair i {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.5);
+  transition: opacity 90ms linear;
+}
+.crosshair i.v { width: 2px; height: 9px; left: 31px; }
+.crosshair i.h { height: 2px; width: 9px; top: 31px; }
+.crosshair .dot {
+  width: 2px; height: 2px; left: 31px; top: 31px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.hitmarker {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%) rotate(45deg);
+  width: 22px; height: 22px;
+  opacity: 0;
+}
+.hitmarker i {
+  position: absolute; background: var(--hm, #fff);
+  box-shadow: 0 0 3px rgba(0,0,0,.8);
+}
+.hitmarker.kill { width: 28px; height: 28px; }
+
+/* --------------------------------- ammo ---------------------------------- */
+.ammo {
+  position: absolute; right: 46px; bottom: 38px;
+  text-align: right;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+}
+.ammo .count {
+  font-size: 52px; font-weight: 700; letter-spacing: -1px;
+  line-height: 0.92;
+  font-variant-numeric: tabular-nums;
+}
+.ammo .count .reserve {
+  font-size: 24px; font-weight: 400;
+  color: var(--hud-dim);
+  margin-left: 6px;
+}
+.ammo .name {
+  font-size: 13px; letter-spacing: 3.4px;
+  color: var(--hud-dim);
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+.ammo.low .count { color: var(--danger); }
+
+/* -------------------------------- health --------------------------------- */
+.vitals {
+  position: absolute; left: 46px; bottom: 42px;
+  width: 210px;
+}
+.vitals .bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.vitals .bar > div {
+  height: 100%; width: 100%;
+  background: var(--hud);
+  transition: width 140ms ease-out;
+}
+.vitals .label {
+  font-size: 11px; letter-spacing: 3px; color: var(--hud-dim);
+  text-transform: uppercase; margin-bottom: 6px;
+}
+
+/* ------------------------------- damage ---------------------------------- */
+.damage-vignette {
+  position: absolute; inset: 0;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, rgba(120,0,0,0) 42%, rgba(150,10,6,0.75) 100%);
+  transition: opacity 160ms ease-out;
+}
+
+/* ------------------------------- overlays -------------------------------- */
+.overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: rgba(4, 6, 8, 0.86);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+  gap: 18px;
+}
+.overlay h1 {
+  font-size: 46px; letter-spacing: 12px; font-weight: 700;
+  text-transform: uppercase;
+}
+.overlay .sub { color: var(--hud-dim); letter-spacing: 3px; font-size: 13px; text-transform: uppercase; }
+.overlay .keys {
+  margin-top: 12px; display: grid; grid-template-columns: auto auto;
+  gap: 6px 22px; font-size: 13px; color: var(--hud-dim);
+}
+.overlay .keys b { color: var(--hud); font-weight: 600; }
+.overlay button {
+  margin-top: 10px;
+  pointer-events: auto;
+  background: var(--accent); color: #12100c;
+  border: 0; padding: 13px 42px;
+  font: inherit; font-size: 15px; font-weight: 700;
+  letter-spacing: 4px; text-transform: uppercase;
+  cursor: pointer;
+}
+.overlay button:hover { filter: brightness(1.12); }
+
+/* -------------------------------- loading -------------------------------- */
+.loading { gap: 14px; }
+.loading .track { width: 340px; height: 3px; background: rgba(255,255,255,0.13); }
+.loading .track > div { height: 100%; width: 0%; background: var(--accent); transition: width 200ms ease-out; }
+.loading .status { font-size: 12px; letter-spacing: 3px; color: var(--hud-dim); text-transform: uppercase; }
+
+/* --------------------------------- perf ---------------------------------- */
+.perf {
+  position: absolute; left: 10px; top: 8px;
+  font-size: 11px; color: rgba(255,255,255,0.42);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}

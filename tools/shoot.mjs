@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+// Screenshot harness for the visual-review loop.
+//
+//   node tools/shoot.mjs --out shots/ --shots default
+//   node tools/shoot.mjs --out shots/ --tod dusk --pose rooftop
+//
+// Boots the game in headless Chromium with a real GPU-less WebGL2 context
+// (SwiftShader), drives the camera to fixed poses, and writes PNGs. Also
+// captures console errors so a broken build fails loudly instead of
+// producing a black frame.
+
+import { chromium } from 'playwright';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+
+const args = Object.fromEntries(
+  process.argv.slice(2).reduce((acc, a, i, arr) => {
+    if (a.startsWith('--')) acc.push([a.slice(2), arr[i + 1]?.startsWith('--') ? true : arr[i + 1]]);
+    return acc;
+  }, []),
+);
+
+const OUT = args.out || 'shots';
+const URL_BASE = args.url || 'http://127.0.0.1:5173/';
+const WIDTH = parseInt(args.width || '1920', 10);
+const HEIGHT = parseInt(args.height || '1080', 10);
+const QUALITY = args.quality || 'high';
+const TOD = args.tod || 'afternoon';
+const TIMEOUT = parseInt(args.timeout || '180000', 10);
+
+/**
+ * Fixed camera poses. Each is [x, y, z, yawDeg, pitchDeg] plus an optional
+ * state override. Chosen to cover the shots a reviewer would actually judge:
+ * a street-level sightline, an interior-ish corner, a long vista, weapon detail.
+ */
+const POSES = {
+  street:      { pos: [0, 1.6, 42], yaw: 180, pitch: -3 },
+  alley:       { pos: [-14, 1.6, -12], yaw: 115, pitch: 0 },
+  vista:       { pos: [26, 1.6, 58], yaw: 205, pitch: -6 },
+  containers:  { pos: [-8, 1.6, -14], yaw: 150, pitch: -2 },
+  weapon:      { pos: [0, 1.6, 44], yaw: 178, pitch: 2, ads: true },
+  sunGlare:    { pos: [0, 1.6, 20], yaw: 236, pitch: 8 },
+  ground:      { pos: [4, 1.6, 30], yaw: 190, pitch: -42 },
+  wall:        { pos: [-20.5, 1.6, 6], yaw: 90, pitch: 0 },
+};
+
+const SHOT_SETS = {
+  default: ['street', 'alley', 'vista', 'containers', 'weapon', 'sunGlare'],
+  quick: ['street', 'weapon'],
+  materials: ['ground', 'wall', 'containers'],
+  all: Object.keys(POSES),
+};
+
+async function main() {
+  await mkdir(OUT, { recursive: true });
+
+  // The sandbox ships a preinstalled Chromium that may not match the revision
+  // this Playwright build expects; prefer it over a download when present.
+  const preinstalled = ['/opt/pw-browsers/chromium-1194/chrome-linux/chrome'].find((p) => existsSync(p));
+
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROMIUM_PATH || preinstalled || undefined,
+    args: [
+      '--use-gl=angle',
+      '--use-angle=swiftshader',
+      '--enable-unsafe-swiftshader',
+      '--disable-lcd-text',
+      '--force-device-scale-factor=1',
+      '--enable-webgl',
+      '--ignore-gpu-blocklist',
+    ],
+  });
+  const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT } });
+
+  const errors = [];
+  page.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
+    if (process.env.VERBOSE) console.log(`[${m.type()}]`, m.text());
+  });
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  const url = `${URL_BASE}?quality=${QUALITY}&tod=${TOD}&autostart=1`;
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+
+  // Wait for the engine to finish baking and start its loop.
+  await page.waitForFunction(
+    () => window.__engine && window.__engine.running && window.__engine.frame > 5,
+    null,
+    { timeout: TIMEOUT, polling: 250 },
+  );
+
+  const names = SHOT_SETS[args.shots || 'default'] || (args.pose ? [args.pose] : SHOT_SETS.default);
+  const written = [];
+
+  for (const name of names) {
+    const pose = POSES[name];
+    if (!pose) { console.error(`unknown pose ${name}`); continue; }
+
+    await page.evaluate((p) => {
+      const e = window.__engine;
+      e.player.teleport(p.pos[0], p.pos[1] - 1.59, p.pos[2]);
+      e.player.yaw = p.yaw * Math.PI / 180;
+      e.player.pitch = p.pitch * Math.PI / 180;
+      e.player.ads = p.ads ? 1 : 0;
+      e.player.velocity.set(0, 0, 0);
+    }, pose);
+
+    // Let TAA/AO/exposure settle and shadows re-fit to the new position.
+    await page.waitForTimeout(700);
+
+    const file = path.join(OUT, `${name}.png`);
+    await page.screenshot({ path: file });
+    written.push(file);
+    console.log('wrote', file);
+  }
+
+  const stats = await page.evaluate(() => {
+    const e = window.__engine;
+    return {
+      fps: Math.round(e.fps),
+      calls: e.renderer.info.render.calls,
+      tris: e.renderer.info.render.triangles,
+      programs: e.renderer.info.programs?.length ?? 0,
+      quality: e.constructor.name,
+    };
+  });
+  console.log('stats', JSON.stringify(stats));
+
+  if (errors.length) {
+    console.error(`\n${errors.length} console error(s):`);
+    for (const e of errors.slice(0, 12)) console.error('  ', e);
+  }
+
+  await writeFile(path.join(OUT, 'report.json'), JSON.stringify({ stats, errors, written, tod: TOD, quality: QUALITY }, null, 2));
+  await browser.close();
+  process.exit(errors.length ? 2 : 0);
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });
