@@ -70,18 +70,22 @@ export function buildHand(side = 1) {
   forearm.name = 'forearm';
   {
     const fb = new Batch();
-    const arm = gRod(0.0400, 0.150, 14, 0, 0, 0.100);
+    // Length matters more than it looks. The wrist sits ~0.2 m from the eye,
+    // so a full 0.34 m forearm runs straight past the near plane and lands as
+    // an untextured slab across the bottom of the screen. Real viewmodels cheat
+    // the arm short and let it leave frame instead.
+    const arm = gRod(0.0385, 0.128, 14, 0, 0, 0.088);
     arm.scale(1.0, 0.86, 1.0);
     fb.add(M.sleeve, arm);
-    const arm2 = gRod(0.0530, 0.170, 14, 0, 0, 0.250);
+    const arm2 = gRod(0.0480, 0.120, 14, 0, 0, 0.202);
     arm2.scale(1.0, 0.88, 1.0);
     fb.add(M.sleeve, arm2);
     // Cuff band where the sleeve meets the glove, plus an elbow pad.
-    fb.add(M.strap, gTube(0.0435, 0.0375, 0.022, 14, 0, 0, 0.036));
-    fb.add(M.strap, gTube(0.0490, 0.0430, 0.016, 14, 0, 0, 0.166));
-    fb.add(M.gloveHard, gChamfer(0.055, 0.020, 0.090, 0, 0.040, 0.250, 0, 0, 0, 0.0060));
+    fb.add(M.strap, gTube(0.0420, 0.0360, 0.020, 14, 0, 0, 0.034));
+    fb.add(M.strap, gTube(0.0448, 0.0392, 0.014, 14, 0, 0, 0.148));
+    fb.add(M.gloveHard, gChamfer(0.050, 0.018, 0.070, 0, 0.036, 0.216, 0, 0, 0, 0.0055));
     // Seam down the length of the sleeve.
-    fb.add(M.strap, gChamfer(0.0060, 0.0060, 0.250, S * 0.036, -0.014, 0.180, 0, 0, 0, 0.0012));
+    fb.add(M.strap, gChamfer(0.0055, 0.0055, 0.210, S * 0.034, -0.013, 0.150, 0, 0, 0, 0.0012));
     fb.flush(forearm, 'arm');
   }
   hand.add(forearm);

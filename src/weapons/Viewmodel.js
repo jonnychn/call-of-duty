@@ -105,23 +105,30 @@ export class Viewmodel {
     // Key from upper-left-front (the "sun over your shoulder" convention),
     // cool bounce from below-right, and two rims that trace the top edge and
     // the underside so the silhouette separates from any background.
-    this.key = new THREE.DirectionalLight(0xfff2e2, 2.1);
+    // Retuned against the filmic tonemap. The shape of the rig matters more
+    // than the absolute numbers: one dominant key so there is a single clear
+    // light direction, a fill about a fifth of it so the shadow side stays
+    // readable without going flat, and rims kept *below* the key so they trace
+    // edges instead of becoming a second key. The previous levels had the top
+    // rim nearly as strong as the key, which is what blew the lower receiver
+    // and the magazine out to near-white at the bottom of frame.
+    this.key = new THREE.DirectionalLight(0xffeedb, 3.6);
     this.key.position.set(-0.75, 1.05, 0.35);
 
-    this.fill = new THREE.DirectionalLight(0x8fb2e6, 0.8);
-    this.fill.position.set(1.0, -0.55, 0.45);
+    this.fill = new THREE.DirectionalLight(0x7f9fd4, 0.55);
+    this.fill.position.set(1.0, -0.35, 0.55);
 
-    this.rim = new THREE.DirectionalLight(0xffe0bc, 1.9);
+    this.rim = new THREE.DirectionalLight(0xffd9ae, 1.55);
     this.rim.position.set(0.55, 0.85, -1.25);
 
-    this.rimLow = new THREE.DirectionalLight(0x9fc4ff, 0.9);
+    // The underside rim is the one that was doing the damage: the magazine and
+    // the magwell face it almost head-on at the bottom of the screen.
+    this.rimLow = new THREE.DirectionalLight(0x9fc4ff, 0.30);
     this.rimLow.position.set(-0.85, -0.70, -0.95);
 
-    // Levels are deliberately conservative: this rig predates the filmic
-    // tonemap, and at its original intensities the receiver clipped to flat
-    // white and the metal broke into specular speckle at grazing angles.
-    // A very soft ambient so the deepest recesses do not crush to pure black.
-    this.ambient = new THREE.HemisphereLight(0xa8c4e8, 0x4a4034, 0.40);
+    // Just enough ambient that the deepest recesses read as dark grey rather
+    // than as holes punched in the model.
+    this.ambient = new THREE.HemisphereLight(0x9fb8d8, 0x3a3228, 0.28);
 
     // Kicks with the muzzle flash: FX drives the real flash light, this one
     // just lifts the receiver and the hands for a frame or two.
@@ -169,7 +176,7 @@ export class Viewmodel {
     this.grips = this.weapon.userData.grips;
 
     // The ADS pose puts the optic's optical axis exactly on the screen centre.
-    this._adsSolve = new THREE.Vector3(0, -this.weapon.userData.sightHeight, -0.175);
+    this._adsSolve = new THREE.Vector3(0, -this.weapon.userData.sightHeight, -0.215);
     return this.weapon;
   }
 
@@ -177,7 +184,10 @@ export class Viewmodel {
     this.scene.environment = envTexture;
     // The gun is metal: the probe is doing most of the work on the receiver
     // and the optic glass, so it runs much hotter here than in the world.
-    this.scene.environmentIntensity = 0.65;
+    // The probe is a bright desert sky. On a weapon that is mostly metal it is
+    // the dominant specular source, so it stays well under 1: this is the
+    // single biggest lever on both the blowout and the speckle.
+    this.scene.environmentIntensity = 0.50;
   }
 
   setSize(w, h) {
@@ -401,7 +411,7 @@ export class Viewmodel {
     R.finger.set(0, -Math.sin(g.trigger.rake), -Math.cos(g.trigger.rake));
     R.curl = 0.92;
     R.thumb = 0.55;
-    R.elbow.set(0.40, -0.52, 0.76);
+    R.elbow.set(0.30, -0.84, 0.45);
     R.radius = g.trigger.radius;
     R.vis = true;
 
@@ -410,7 +420,7 @@ export class Viewmodel {
     L.finger.set(1, 0.10, -0.10).normalize();
     L.curl = 0.86;
     L.thumb = 0.35;
-    L.elbow.set(-0.52, -0.46, 0.72);
+    L.elbow.set(-0.46, -0.76, 0.46);
     L.radius = g.support.radius;
     L.vis = true;
 

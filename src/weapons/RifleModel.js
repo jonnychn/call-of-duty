@@ -53,13 +53,16 @@ function picatinny(b, M, { z0, z1, y, w = 0.0208, pitch = 0.0102 }) {
   const len = z1 - z0;
   b.add(M.alu, gChamfer(w, 0.0042, len, 0, y, (z0 + z1) / 2, 0, 0, 0, 0.0006));
   const n = Math.max(1, Math.floor(len / pitch));
-  const ribW = 0.0055;
+  const ribW = 0.0062;
   for (let i = 0; i < n; i++) {
     const z = z0 + pitch * 0.5 + i * pitch;
-    // Trapezoidal rib: wider at the base, chamfered top — the classic profile.
-    b.add(M.alu, gChamfer(w, 0.0030, ribW, 0, y + 0.0034, z, 0, 0, 0, 0.0009));
+    // Trapezoidal rib: chamfered top, and deliberately shallow. A full-height
+    // picatinny rib is ~3 mm proud, which at viewmodel distance is a 2-pixel
+    // comb across the top of the weapon and shimmers under any camera motion.
+    // Cutting the relief roughly in half keeps the read and kills the crawl.
+    b.add(M.alu, gChamfer(w, 0.0018, ribW, 0, y + 0.0028, z, 0, 0, 0, 0.0007));
   }
-  return y + 0.0049; // top of rail
+  return y + 0.0037; // top of rail
 }
 
 /** Aimpoint-style red dot with a coated lens, a tube shadow and a hot dot. */
@@ -105,21 +108,24 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   b.flush(g, 'optic');
 
   // ---- glass -------------------------------------------------------------
-  // Flat discs, not spherical caps: at 20 mm the curvature is invisible and a
-  // cap is very easy to build inside-out or squashed. What sells glass here is
-  // the coating tint plus a grazing-angle sheen, not the profile.
+  // A flat tinted disc, and deliberately nothing more.
   //
-  // The tint is deliberately light. A red dot the player has to see *through*
-  // may not eat more than a fraction of a stop of the world behind it.
+  // The previous version used a near-mirror MeshPhysicalMaterial with a
+  // clearcoat. A flat disc facing the camera reflects the environment probe
+  // straight back at the viewer, and at roughness 0.03 that samples a high mip
+  // of the PMREM cube, whose six face seams cross in the middle — which is
+  // what put a four-bladed pinwheel in the centre of the sight picture.
+  //
+  // Glass the player has to aim through gets no environment reflection at all.
+  // It is a tint, a rim sheen, and the emitter. Nothing else may live in the
+  // aperture: everything there is competing with the target.
   const aperture = tube - 0.0028;
-  const lensMat = new THREE.MeshPhysicalMaterial({
+  const lensMat = new THREE.MeshBasicMaterial({
     name: 'lens',
-    color: 0x16283e, roughness: 0.03, metalness: 0.0,
-    transparent: true, opacity: 0.15, envMapIntensity: 2.4,
-    clearcoat: 1.0, clearcoatRoughness: 0.02,
-    depthWrite: false, side: THREE.DoubleSide,
+    color: 0x22405e, transparent: true, opacity: 0.13,
+    depthWrite: false, side: THREE.DoubleSide, toneMapped: true,
   });
-  const lensGeo = new THREE.CircleGeometry(aperture, 28);
+  const lensGeo = new THREE.CircleGeometry(aperture, 32);
   const front = new THREE.Mesh(lensGeo, lensMat);
   front.position.set(0, y, z - len / 2 + 0.010);
   front.renderOrder = 4;
@@ -129,22 +135,22 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   rear.renderOrder = 4;
   g.add(rear);
 
-  // Coating sheen: an additive ring, brightest at the rim, which is where a
-  // real AR coating flares. Built as a vertex-coloured ring so it costs one
-  // draw call and needs no texture.
-  const ringGeo = new THREE.RingGeometry(aperture * 0.45, aperture, 28, 1);
+  // Coating sheen: a thin additive ring hugging the rim, which is where a real
+  // AR coating actually flares. Kept outside the useful aperture so it never
+  // washes the middle of the sight picture.
+  const ringGeo = new THREE.RingGeometry(aperture * 0.80, aperture, 32, 1);
   {
     const c = ringGeo.attributes.position;
     const col = new Float32Array(c.count * 3);
     for (let i = 0; i < c.count; i++) {
       const r = Math.hypot(c.getX(i), c.getY(i)) / aperture;
-      const k = Math.pow(THREE.MathUtils.clamp((r - 0.45) / 0.55, 0, 1), 2.0);
-      col[i * 3] = 0.16 * k; col[i * 3 + 1] = 0.34 * k; col[i * 3 + 2] = 0.85 * k;
+      const k = Math.pow(THREE.MathUtils.clamp((r - 0.80) / 0.20, 0, 1), 1.5);
+      col[i * 3] = 0.10 * k; col[i * 3 + 1] = 0.22 * k; col[i * 3 + 2] = 0.55 * k;
     }
     ringGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   }
   const flare = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.55,
+    vertexColors: true, transparent: true, opacity: 0.7,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
   }));
   flare.position.set(0, y, z - len / 2 + 0.0125);
@@ -152,44 +158,42 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   g.add(flare);
 
   // ---- reticle -----------------------------------------------------------
-  // Emissive well above 1.0 so it survives the filmic curve and blooms. The
-  // dot, its halo and the glass wash are three separate additive layers,
-  // which is what makes an emitter read as a light source rather than a decal.
+  // Two additive layers only: a hard dot and a soft halo about four times its
+  // radius. The colour is well above 1.0 so it survives the filmic curve and
+  // trips the bloom threshold, which is what makes it read as an emitter
+  // rather than a red sticker on the glass.
   const dotMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(14.0, 1.1, 0.35),
+    color: new THREE.Color(16.0, 1.2, 0.35),
     transparent: true, blending: THREE.AdditiveBlending,
     depthWrite: false, depthTest: false, toneMapped: true,
   });
   const reticle = new THREE.Group();
   reticle.name = 'reticle';
-  // 2 MOA at this scale, plus a soft bloom disc an order of magnitude wider.
-  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.0011, 18), dotMat);
+  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.00105, 20), dotMat);
   dot.position.z = 0.0012;
   reticle.add(dot);
-  const haloMat = dotMat.clone();
-  haloMat.color = new THREE.Color(3.0, 0.20, 0.06);
-  haloMat.opacity = 0.55;
-  const halo = new THREE.Mesh(new THREE.CircleGeometry(0.0040, 24), haloMat);
-  halo.position.z = 0.0008;
-  reticle.add(halo);
-  // Faint red wash across the glass — the light the emitter throws back onto
-  // the coating. Falls off from the centre so it never looks like a flat card.
-  const washGeo = new THREE.CircleGeometry(aperture, 28);
+
+  // Halo: vertex-coloured so it falls off smoothly instead of ending on a hard
+  // circular edge, which is the giveaway on a cheap red dot.
+  const haloGeo = new THREE.CircleGeometry(0.0042, 24);
   {
-    const c = washGeo.attributes.position;
+    const c = haloGeo.attributes.position;
     const col = new Float32Array(c.count * 3);
     for (let i = 0; i < c.count; i++) {
-      const r = Math.hypot(c.getX(i), c.getY(i)) / aperture;
-      const k = Math.pow(1 - r, 2.2);
-      col[i * 3] = 0.55 * k; col[i * 3 + 1] = 0.05 * k; col[i * 3 + 2] = 0.02 * k;
+      const r = Math.hypot(c.getX(i), c.getY(i)) / 0.0042;
+      const k = Math.pow(1 - r, 2.0);
+      col[i * 3] = 2.6 * k; col[i * 3 + 1] = 0.18 * k; col[i * 3 + 2] = 0.05 * k;
     }
-    washGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    haloGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   }
-  const washMat = new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.5,
+  const haloMat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.85,
     blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
   });
-  reticle.add(new THREE.Mesh(washGeo, washMat));
+  const halo = new THREE.Mesh(haloGeo, haloMat);
+  halo.position.z = 0.0008;
+  reticle.add(halo);
+
   // The reticle floats at the *front* lens: that is what gives the parallax
   // you expect when your head moves off-axis.
   reticle.position.set(0, y, z - len / 2 + 0.011);
@@ -413,7 +417,7 @@ export function buildCarbine(materials) {
   const stock = stockAssembly(M, { z0: 0.140, y: 0.0035 });
   root.add(stock);
 
-  const optic = redDot(M, { y: RAIL_Y + 0.0049 + 0.0245, z: -0.030 });
+  const optic = redDot(M, { y: RAIL_Y + 0.0037 + 0.0245, z: -0.030 });
   root.add(optic);
 
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
@@ -508,7 +512,7 @@ export function buildPDW() {
   mag.rotation.x = 0.16;
   root.add(mag);
 
-  const optic = redDot(M, { y: RAIL_Y + 0.0049 + 0.0225, z: -0.040, tube: 0.0148 });
+  const optic = redDot(M, { y: RAIL_Y + 0.0037 + 0.0225, z: -0.040, tube: 0.0148 });
   root.add(optic);
 
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });

@@ -71,6 +71,7 @@ const SHOT_SETS = {
   materials: ['ground', 'wall', 'containers'],
   level: ['street', 'arch', 'courtyard', 'shopFront', 'shopIn', 'rooftop', 'market', 'alleyDeep'],
   level2: ['throughArch', 'minaret', 'terrace', 'vista', 'alley', 'sunGlare'],
+  weapons: ['wpnHip', 'wpnAds', 'wpnSky', 'wpnSkyAds', 'wpnDark'],
   all: Object.keys(POSES),
 };
 

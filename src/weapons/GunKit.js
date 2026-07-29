@@ -244,30 +244,37 @@ export function gunMaterials() {
 
   // Anodising is a dielectric film over aluminium, not bare metal, so the
   // receiver runs at partial metalness: full metalness mirrors the desert sky
-  // straight into the camera and the whole gun clips to white. Roughness is
-  // also kept off the floor — under a normal map, gloss below ~0.35 is what
-  // produces the grazing-angle specular speckle.
+  // straight into the camera and the whole gun clips to white.
+  //
+  // Roughness and normal strength are both deliberately conservative. A gun is
+  // built almost entirely from sub-millimetre chamfers, and a glossy metal
+  // whose normals change that fast samples the environment probe in a
+  // different direction on every pixel — that is the rainbow specular speckle
+  // along the lower receiver. There is no NDF filtering in three, so the only
+  // levers are: keep gloss off the floor, keep the detail normal shallow, and
+  // keep the probe from running hot. All three are applied here.
   _lib = {
-    alu: std('alu', 0x3b3e44, 0.46, 0.72, { normalMap: machined, roughnessMap: wearRoughness(0.46, 0.22), ns: 0.40, uvScale: 30, env: 0.85 }),
+    alu: std('alu', 0x3f4249, 0.52, 0.66, { normalMap: machined, roughnessMap: wearRoughness(0.52, 0.13), ns: 0.16, uvScale: 30, env: 0.52 }),
     // Same alloy but on the receiver flats, where the markings live.
-    aluMarked: std('aluMarked', 0x393c42, 0.48, 0.70, { normalMap: marks, ns: 0.55, uvScale: 9, env: 0.8 }),
-    // Nitrided barrel steel — darker and glossier than the receiver.
-    steel: std('steel', 0x2f333a, 0.36, 0.95, { normalMap: machined, roughnessMap: wearRoughness(0.36, 0.16), ns: 0.30, uvScale: 42, env: 0.8 }),
+    aluMarked: std('aluMarked', 0x3b3e44, 0.60, 0.60, { normalMap: marks, ns: 0.30, uvScale: 9, env: 0.45 }),
+    // Nitrided barrel steel — darker and glossier than the receiver, but only
+    // just: it lives on cylinders, which alias even more readily than flats.
+    steel: std('steel', 0x323639, 0.40, 0.90, { normalMap: machined, roughnessMap: wearRoughness(0.40, 0.10), ns: 0.13, uvScale: 42, env: 0.55 }),
     // Bare/worn steel on pins, bolt face, springs.
-    bright: std('bright', 0x8b939d, 0.30, 0.95, { normalMap: machined, ns: 0.25, uvScale: 60, env: 0.9 }),
+    bright: std('bright', 0x8d959e, 0.36, 0.92, { normalMap: machined, ns: 0.12, uvScale: 60, env: 0.6 }),
     // Flat-dark-earth polymer furniture. The one warm accent on the weapon.
-    fde: std('fde', 0x62553f, 0.68, 0.02, { normalMap: machined, roughnessMap: wearRoughness(0.66, 0.24), ns: 0.45, uvScale: 30, env: 0.55 }),
-    rubber: std('rubber', 0x232528, 0.90, 0.0, { normalMap: stipple, ns: 1.0, uvScale: 60, env: 0.4 }),
-    poly: std('poly', 0x2a2d31, 0.70, 0.02, { normalMap: machined, ns: 0.35, uvScale: 34, env: 0.55 }),
-    opticBody: std('opticBody', 0x26282c, 0.50, 0.45, { normalMap: machined, ns: 0.35, uvScale: 36, env: 0.7 }),
+    fde: std('fde', 0x60543f, 0.72, 0.0, { normalMap: machined, roughnessMap: wearRoughness(0.70, 0.16), ns: 0.30, uvScale: 30, env: 0.40 }),
+    rubber: std('rubber', 0x202225, 0.93, 0.0, { normalMap: stipple, ns: 0.85, uvScale: 60, env: 0.28 }),
+    poly: std('poly', 0x272a2e, 0.76, 0.0, { normalMap: machined, ns: 0.26, uvScale: 34, env: 0.35 }),
+    opticBody: std('opticBody', 0x232529, 0.62, 0.30, { normalMap: machined, ns: 0.22, uvScale: 36, env: 0.45 }),
     // Exposed fingertips. The only warm, non-metal, non-black surface in the
     // frame — it is what stops the hands merging into the weapon.
-    skin: std('skin', 0x7a5540, 0.70, 0.0, { normalMap: stipple, ns: 0.22, uvScale: 120, env: 0.4 }),
-    glove: std('glove', 0x2b2d32, 0.84, 0.02, { normalMap: stipple, ns: 0.75, uvScale: 44, env: 0.45 }),
-    gloveHard: std('gloveHard', 0x1d1f23, 0.56, 0.05, { normalMap: machined, ns: 0.45, uvScale: 40, env: 0.5 }),
-    sleeve: std('sleeve', 0x565442, 0.92, 0.0, { normalMap: weave, ns: 0.85, uvScale: 70, env: 0.4 }),
-    strap: std('strap', 0x2a2b2d, 0.8, 0.02, { normalMap: weave, ns: 0.7, uvScale: 90, env: 0.6 }),
-    brass: std('brass', 0xb08d4a, 0.22, 1.0, { uvScale: 60 }),
+    skin: std('skin', 0x7a5540, 0.72, 0.0, { normalMap: stipple, ns: 0.18, uvScale: 120, env: 0.30 }),
+    glove: std('glove', 0x2a2c31, 0.86, 0.0, { normalMap: stipple, ns: 0.60, uvScale: 44, env: 0.30 }),
+    gloveHard: std('gloveHard', 0x1c1e22, 0.64, 0.0, { normalMap: machined, ns: 0.32, uvScale: 40, env: 0.32 }),
+    sleeve: std('sleeve', 0x53513f, 0.94, 0.0, { normalMap: weave, ns: 0.70, uvScale: 70, env: 0.26 }),
+    strap: std('strap', 0x232426, 0.86, 0.0, { normalMap: weave, ns: 0.55, uvScale: 90, env: 0.30 }),
+    brass: std('brass', 0x9d7c3f, 0.38, 0.92, { uvScale: 60, env: 0.5 }),
   };
   return _lib;
 }
