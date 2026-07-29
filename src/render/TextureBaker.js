@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { settings } from '../core/Settings.js';
-import { generateSurface, surfaceNames } from './SurfaceGen.js';
+import { generateSurface, generateDetailNormal, surfaceNames } from './SurfaceGen.js';
 
 export { surfaceNames };
 
@@ -57,24 +57,22 @@ class BakePool {
 
   _dispatch(w, job) {
     this.pending.set(job.id, job);
-    w.postMessage({ id: job.id, name: job.name, size: job.size, seed: job.seed, opts: job.opts });
+    w.postMessage({ id: job.id, kind: job.kind, name: job.name, size: job.size, seed: job.seed, opts: job.opts });
   }
 
-  run(name, size, seed, opts) {
+  run(kind, name, size, seed, opts) {
+    const local = () => (kind === 'detail'
+      ? generateDetailNormal(name, size, seed, opts.worldSize, opts.amplitude)
+      : generateSurface(name, size, seed, opts));
     // Fall back to synchronous generation if workers are unavailable
     // (older browsers, file:// origins, or a worker that failed to boot).
-    if (this.failed) {
-      return Promise.resolve().then(() => generateSurface(name, size, seed, opts));
-    }
+    if (this.failed) return Promise.resolve().then(local);
     return new Promise((resolve, reject) => {
-      const job = { id: this.nextId++, name, size, seed, opts, resolve, reject };
+      const job = { id: this.nextId++, kind, name, size, seed, opts, resolve, reject };
       let w = this.idle.pop();
       if (!w && this.workers.length < this.size) w = this._spawn();
       if (!w) {
-        if (this.failed) {
-          resolve(generateSurface(name, size, seed, opts));
-          return;
-        }
+        if (this.failed) { resolve(local()); return; }
         this.queue.push(job);
         return;
       }
@@ -142,7 +140,7 @@ function toMaps(r) {
 // --------------------------------- API -------------------------------------
 
 function keyFor(name, size, seed, opts) {
-  return `${name}|${size}|${seed}|${opts.base ? opts.base.join(',') : ''}|${opts.normalStrength ?? ''}`;
+  return `${name}|${size}|${seed}|${opts.base ? opts.base.join(',') : ''}|${opts.normalStrength ?? ''}|${opts.tile ?? ''}`;
 }
 
 /**
@@ -157,7 +155,7 @@ export function bakeSurface(name, opts = {}) {
   if (cache.has(key)) return Promise.resolve(cache.get(key));
   if (inflight.has(key)) return inflight.get(key);
 
-  const p = pool.run(name, size, seed, opts).then((r) => {
+  const p = pool.run('surface', name, size, seed, opts).then((r) => {
     const maps = toMaps(r);
     cache.set(key, maps);
     inflight.delete(key);
@@ -180,6 +178,28 @@ export async function bakeAll(requests, onProgress) {
   return Object.fromEntries(results);
 }
 
+// ----------------------------- detail normals ------------------------------
+
+const detailCache = new Map();
+
+/**
+ * Bakes a micro-normal tile for one detail family. These are tiny (a few
+ * centimetres of world per repeat) and shared by every material that names the
+ * same family, so the whole library costs two or three of them.
+ */
+export function bakeDetailNormal(family, opts = {}) {
+  const size = opts.size || 512;
+  const seed = opts.seed ?? 5;
+  const worldSize = opts.worldSize ?? 0.12;
+  const amplitude = opts.amplitude ?? 0.0011;
+  const key = `${family}|${size}|${seed}|${worldSize}|${amplitude}`;
+  if (detailCache.has(key)) return detailCache.get(key);
+  const p = pool.run('detail', family, size, seed, { worldSize, amplitude })
+    .then((r) => rgbaToTexture(r.normal, r.size));
+  detailCache.set(key, p);
+  return p;
+}
+
 export function disposeTextureCache() {
   // A map set aliases one ORM texture across three slots, so dedupe before
   // disposing rather than calling dispose() on the same texture four times.
@@ -190,5 +210,7 @@ export function disposeTextureCache() {
     }
   }
   cache.clear();
+  for (const p of detailCache.values()) Promise.resolve(p).then((t) => t && t.dispose());
+  detailCache.clear();
   pool.dispose();
 }

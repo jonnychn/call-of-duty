@@ -28,15 +28,39 @@ export function planarUV(geo, scale = 26) {
   const pos = geo.attributes.position;
   const nor = geo.attributes.normal;
   const uv = new Float32Array(pos.count * 2);
-  for (let i = 0; i < pos.count; i++) {
-    const nx = Math.abs(nor.getX(i)), ny = Math.abs(nor.getY(i)), nz = Math.abs(nor.getZ(i));
+  const tri = geo.index ? null : 3;
+
+  // The projection axis must be chosen per TRIANGLE, not per vertex. On a
+  // 45-degree chamfer the two dominant components are equal to within float
+  // error, so a per-vertex choice can pick different axes for vertices of the
+  // same face — the UVs then span the whole texture across a 0.7 mm strip and
+  // the normal map turns into specular confetti at grazing angles. This was
+  // the source of the speckle on the receiver.
+  const write = (i, axis) => {
     const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
     let u, v;
-    if (nx >= ny && nx >= nz) { u = z; v = y; }
-    else if (ny >= nz) { u = x; v = z; }
+    if (axis === 0) { u = z; v = y; }
+    else if (axis === 1) { u = x; v = z; }
     else { u = x; v = y; }
     uv[i * 2] = u * scale;
     uv[i * 2 + 1] = v * scale;
+  };
+
+  if (tri) {
+    for (let t = 0; t < pos.count; t += 3) {
+      let nx = 0, ny = 0, nz = 0;
+      for (let k = 0; k < 3; k++) {
+        nx += nor.getX(t + k); ny += nor.getY(t + k); nz += nor.getZ(t + k);
+      }
+      nx = Math.abs(nx); ny = Math.abs(ny); nz = Math.abs(nz);
+      const axis = (nx >= ny && nx >= nz) ? 0 : (ny >= nz ? 1 : 2);
+      write(t, axis); write(t + 1, axis); write(t + 2, axis);
+    }
+  } else {
+    for (let i = 0; i < pos.count; i++) {
+      const nx = Math.abs(nor.getX(i)), ny = Math.abs(nor.getY(i)), nz = Math.abs(nor.getZ(i));
+      write(i, (nx >= ny && nx >= nz) ? 0 : (ny >= nz ? 1 : 2));
+    }
   }
   geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   return geo;

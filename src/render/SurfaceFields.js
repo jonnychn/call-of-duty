@@ -191,22 +191,27 @@ for (let i = 0; i < HAO_DIRS; i++) {
  */
 export function horizonAO(height, size, amplitude, tileMeters, opts = {}) {
   const {
-    radiusMeters = 0.09,
+    radiusTexels = 11,
     steps = 7,
     strength = 1.0,
     microStrength = 0.55,
-    workSize = 256,
+    workSize = 320,
   } = opts;
 
+  // The march radius is expressed in texels of the work grid, not in metres.
+  // Metres look more principled but are a trap: a 4.5 cm radius on a 5 m tile
+  // downsampled to 256 is two texels, so the horizon search sees almost
+  // nothing and the whole map comes back white. Texels keep the search a
+  // fixed fraction of the tile no matter how much world the tile covers.
   const factor = Math.max(1, Math.round(size / Math.min(workSize, size)));
   const n = (size / factor) | 0;
   const h = factor > 1 ? downsample(height, size, factor) : height;
   const texelM = tileMeters / n;
-  const maxR = Math.max(2, Math.round(radiusMeters / texelM));
+  const maxR = Math.max(3, Math.min(radiusTexels, n >> 3));
 
   const ao = new Float32Array(n * n);
-  // Precompute step radii with a square distribution: dense near the centre
-  // where contact darkening lives, sparse far out.
+  // Step radii follow a square-ish distribution: dense near the centre where
+  // contact darkening lives, sparse further out.
   const radii = new Float32Array(steps);
   for (let s = 0; s < steps; s++) radii[s] = Math.max(1, Math.round(maxR * Math.pow((s + 1) / steps, 1.7)));
 
@@ -254,12 +259,16 @@ export function horizonAO(height, size, amplitude, tileMeters, opts = {}) {
   // Micro cavity: fine pits below their immediate neighbourhood. Radius is
   // deliberately tiny (a few texels) so this only catches detail the horizon
   // march downsampled away.
-  const microR = Math.max(1, size >> 9);
-  const local = blurWrap(height, size, microR + 1);
+  const microR = Math.max(2, size >> 8);
+  const local = blurWrap(height, size, microR);
   const out = new Float32Array(size * size);
-  const microK = amplitude * 26 * microStrength;
+  // Height-field units, not metres: this term is about how far a texel sits
+  // below its immediate neighbourhood relative to the field's own range, which
+  // is exactly what a pore or a mortar joint is.
+  const microK = 2.4 * microStrength;
   for (let i = 0; i < out.length; i++) {
-    const micro = clamp01(1 - Math.max(0, local[i] - height[i]) * microK);
+    const dip = local[i] - height[i];
+    const micro = dip > 0 ? clamp01(1 - dip * microK) : 1;
     out[i] = clamp01(coarse[i] * micro);
   }
   return out;

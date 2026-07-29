@@ -7,3 +7,6 @@ review/
 # agent scratch scripts
 *.tmp.mjs
 .*-measure.mjs
+dist-atmo/
+.load-probe.mjs
+tools/_diag.mjs

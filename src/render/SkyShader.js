@@ -52,6 +52,13 @@ export function patchSky(material) {
     uniform vec3 moonPosition;
     uniform float moonIntensity;
     uniform float moonSize;
+    uniform float cloudCoverage;
+    uniform float cloudDensity;
+    uniform float cloudScale;
+    uniform float cloudHigh;
+    uniform vec3 cloudColor;
+    uniform vec3 cloudShadow;
+    uniform float cloudTime;
 
     float skyHash( vec3 p ) {
       p = fract( p * 0.3183099 + vec3( 0.71, 0.113, 0.419 ) );

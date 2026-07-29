@@ -109,6 +109,15 @@ function buildMicro(n, seed, freq, octaves) {
   return d;
 }
 
+/**
+ * Direct index into a micro tile. `sx`/`sy` are texel coordinates and may be
+ * strided to make the grain anisotropic — stepping x four times faster than y
+ * is how the mill lines on rolled steel and the fibre of sawn timber are made,
+ * for the price of one extra multiply.
+ */
+function mA(m, sx, sy) { return m.A[(sy % MA_N) * MA_N + (sx % MA_N)]; }
+function mB(m, sx, sy) { return m.B[(sy % MB_N) * MB_N + (sx % MB_N)]; }
+
 /** Two decorrelated micro-noise tiles: A is coarser grain, B is fine grit. */
 function micro(seed) {
   let m = microCache.get(seed);
@@ -118,6 +127,35 @@ function micro(seed) {
     microCache.set(seed, m);
   }
   return m;
+}
+
+// ------------------------------ stone masks --------------------------------
+
+const ROT_C = new Float32Array(8), ROT_S = new Float32Array(8);
+for (let i = 0; i < 8; i++) { const a = i * 0.3927 + 0.11; ROT_C[i] = Math.cos(a); ROT_S[i] = Math.sin(a); }
+
+/**
+ * Coverage mask for one angular stone, given the offset from its cell point.
+ *
+ * A plain radial falloff gives perfect circles, and a field of perfect circles
+ * reads as bubble wrap no matter how good the shading on it is — it was the
+ * single most damaging artefact in the first pass of the aggregate surfaces.
+ * Crushed stone is angular, so the distance metric is an octagonal norm on a
+ * per-stone rotated, per-stone elongated frame, with the outline further
+ * broken up by the surface's own micro grain. Rotations come from an
+ * eight-entry table indexed by the cell random: a per-texel sin/cos would cost
+ * more than everything else in the loop put together.
+ *
+ * @param jag  outline perturbation, normally (micro - 0.5) * r
+ */
+function stoneMask(dx, dy, id, r, jag) {
+  const k = (id * 8) & 7;
+  const ca = ROT_C[k], sa = ROT_S[k];
+  const asp = 0.70 + id * 0.66;
+  const ax = Math.abs(dx * ca - dy * sa) * asp;
+  const ay = Math.abs(dx * sa + dy * ca) / asp;
+  const d = Math.max(ax, ay, (ax + ay) * 0.71) + jag;
+  return 1 - smoothstep(r * 0.74, r, d);
 }
 
 function lerp3(out, a, b, t) {
@@ -166,7 +204,7 @@ const SURFACES = {
    */
   concrete: {
     amplitude: 0.014, tile: 2.5, detail: 'grain',
-    ao: { radiusMeters: 0.04, strength: 1.7, microStrength: 1.1 },
+    ao: { radiusTexels: 14, strength: 1.7, microStrength: 1.1 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -301,7 +339,7 @@ const SURFACES = {
    */
   asphalt: {
     amplitude: 0.010, tile: 6.0, detail: 'grain',
-    ao: { radiusMeters: 0.045, strength: 1.25, microStrength: 0.8 },
+    ao: { radiusTexels: 12, strength: 1.25, microStrength: 0.8 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -315,7 +353,8 @@ const SURFACES = {
       const tar = [0.052, 0.052, 0.056];
       const grey = [0.150, 0.150, 0.156];
       const stone = [0.300, 0.290, 0.276];
-      const c = [0, 0, 0];
+      const c = [0, 0, 0], stoneTone = [0, 0, 0];
+      const mic = micro(seed + 5);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -323,44 +362,66 @@ const SURFACES = {
           const i = y * size + x;
           const u = x / size;
 
-          worleyCell(u * 34, v * 34, 34, seed, CELL);
-          const bigStone = (1 - smoothstep(0.02, 0.20, CELL[0])) * smoothstep(0.30, 0.75, CELL[2]);
-          worleyCell(u * 96, v * 96, 96, seed + 11, CELL);
-          const chip = (1 - smoothstep(0.01, 0.11, CELL[0])) * smoothstep(0.45, 0.85, CELL[2]);
+          // Aggregate. Asphalt is a *stone* surface held together by bitumen —
+          // the tell is a dense field of pale chips, not a black sheet. Each
+          // stone gets its own size and tone from its cell random.
+          const grain = mA(mic, x, y);
+          const jag = (grain - 0.5);
+          scatter2(u * 30, v * 30, 30, seed, CELL);
+          const bId = CELL[1];
+          const bR = 0.17 + bId * 0.28;
+          const bigStone = stoneMask(CELL[2], CELL[3], bId, bR, jag * bR * 0.6) * smoothstep(0.14, 0.38, bId);
+          scatter2(u * 82, v * 82, 82, seed + 11, CELL);
+          const cId = CELL[1];
+          const chip = stoneMask(CELL[2], CELL[3], cId, 0.11 + cId * 0.12, jag * 0.07) * smoothstep(0.20, 0.48, cId);
 
           const alligator = smoothstep(0.80, 0.99, bs(alliB, u, v));
-          const grain = vfbm2(u * 340, v * 340, { octaves: 3, period: 340, seed: seed + 5 });
-          const sparkle = smoothstep(0.955, 1.0, value2(u * 600, v * 600, 600, seed + 9));
+          const sparkle = smoothstep(0.90, 1.0, mB(mic, x, y));
 
           const pa = bs(patch, u, v), oi = bs(oilB, u, v), tr = bs(trackB, u, v), du = bs(dustB, u, v);
           const exposure = smoothstep(0.35, 0.75, pa);
           const polish = smoothstep(0.55, 0.9, tr);
           const oily = smoothstep(0.70, 0.90, oi);
 
-          height[i] = clamp01(0.45
-            + (pa - 0.5) * 0.22
-            + bigStone * exposure * 0.40
-            + chip * (0.4 + exposure * 0.6) * 0.16
+          height[i] = clamp01(0.38
+            + (pa - 0.5) * 0.20
+            + bigStone * (0.30 + exposure * 0.55) * 0.52
+            + chip * (0.3 + exposure * 0.7) * 0.22
             + (grain - 0.5) * 0.06
-            - alligator * 0.60
-            - polish * 0.06);
+            - alligator * 0.70
+            - polish * 0.08);
 
-          // asphalt is genuinely dark — resisting the urge to lift it is most
-          // of what makes a road read as tarmac rather than grey plastic
-          lerp3(c, tar, grey, exposure * 0.85 + (pa - 0.5) * 0.2);
-          lerp3(c, c, stone, clamp01(bigStone * exposure + chip * exposure * 0.7));
-          const sh = 0.86 + (grain - 0.5) * 0.22 + (pa - 0.5) * 0.12;
+          // The bitumen matrix is genuinely dark, but the stone in it is not,
+          // and the contrast between the two is the entire read. Crushing both
+          // to black is why so much procedural asphalt looks like a void.
+          lerp3(c, tar, grey, exposure * 0.9 + (pa - 0.5) * 0.25);
+          // Sound asphalt keeps its aggregate coated in bitumen and reads
+          // almost uniform; it is only where the surface has ravelled that
+          // the stone shows through. Lifting every chip everywhere turns a
+          // road into terrazzo.
+          const bigK = clamp01(bigStone * (0.10 + exposure * 0.85));
+          const chipK = clamp01(chip * (0.06 + exposure * 0.72)) * (1 - bigK);
+          stoneTone[0] = stone[0] * (0.55 + bId * 0.85);
+          stoneTone[1] = stone[1] * (0.55 + bId * 0.83);
+          stoneTone[2] = stone[2] * (0.55 + bId * 0.80);
+          lerp3(c, c, stoneTone, bigK);
+          stoneTone[0] = stone[0] * (0.50 + cId * 0.95);
+          stoneTone[1] = stone[1] * (0.50 + cId * 0.92);
+          stoneTone[2] = stone[2] * (0.50 + cId * 0.88);
+          lerp3(c, c, stoneTone, chipK);
+          const sh = 0.84 + (grain - 0.5) * 0.34 + (pa - 0.5) * 0.16;
           c[0] *= sh; c[1] *= sh; c[2] *= sh;
-          c[0] += sparkle * 0.30; c[1] += sparkle * 0.31; c[2] += sparkle * 0.33;
-          const dk = smoothstep(0.5, 0.95, du) * exposure * 0.5;
+          c[0] += sparkle * 0.26; c[1] += sparkle * 0.27; c[2] += sparkle * 0.30;
+          const dk = smoothstep(0.5, 0.95, du) * exposure * 0.55;
           c[0] = mix(c[0], 0.30, dk); c[1] = mix(c[1], 0.285, dk); c[2] = mix(c[2], 0.255, dk);
           lerp3(c, c, OIL, oily * 0.9);
-          c[0] *= 1 - alligator * 0.35; c[1] *= 1 - alligator * 0.35; c[2] *= 1 - alligator * 0.35;
+          c[0] *= 1 - alligator * 0.40; c[1] *= 1 - alligator * 0.40; c[2] *= 1 - alligator * 0.40;
           writeRGB(rgb, i, c[0], c[1], c[2]);
 
-          let r = 0.97 - exposure * 0.05 + (grain - 0.5) * 0.10;
-          r = mix(r, 0.42, polish * 0.85);      // tyre-polished tracks
-          r = mix(r, 0.18, oily);
+          let r = 0.97 - exposure * 0.05 + (grain - 0.5) * 0.14;
+          r = mix(r, 0.46 + bId * 0.24, bigK * 0.8);   // washed stone faces
+          r = mix(r, 0.40, polish * 0.85);             // tyre-polished tracks
+          r = mix(r, 0.16, oily);
           rough[i] = clamp01(r - sparkle * 0.35 + dk * 0.03);
           metal[i] = 0;
         }
@@ -377,7 +438,7 @@ const SURFACES = {
    */
   paintedMetal: {
     amplitude: 0.0035, tile: 2.5, detail: 'brushed',
-    ao: { radiusMeters: 0.03, strength: 0.9, microStrength: 0.5 },
+    ao: { radiusTexels: 10, strength: 0.9, microStrength: 0.5 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -395,6 +456,7 @@ const SURFACES = {
       const rustLt = [0.400, 0.210, 0.100];
       const steel = [0.560, 0.565, 0.580];
       const c = [0, 0, 0];
+      const mic = micro(seed + 2);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -411,8 +473,8 @@ const SURFACES = {
           const rustMask = smoothstep(0.50, 0.80, rustRaw) * smoothstep(0.50, 0.60, chipRaw);
           const scratch = smoothstep(0.93, 1.0, bs(scratchB, u, v));
 
-          const peel = vfbm2(u * 260, v * 260, { octaves: 2, period: 260, seed: seed + 2 });
-          const mill = vfbm2(u * 500, v * 40, { octaves: 2, period: 500, seed: seed + 6 });
+          const peel = mA(mic, x, y);
+          const mill = mB(mic, x * 6, y);      // rolled mill grain runs along the sheet
           const dent = bs(dentB, u, v);
 
           height[i] = clamp01(0.60
@@ -452,7 +514,7 @@ const SURFACES = {
   /** Parkerised gunmetal: phosphate crystal grain, machining marks, edge wear. */
   gunmetal: {
     amplitude: 0.0012, tile: 0.5, detail: 'brushed',
-    ao: { radiusMeters: 0.006, strength: 0.7, microStrength: 0.9 },
+    ao: { radiusTexels: 9, strength: 0.7, microStrength: 0.9 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -460,6 +522,7 @@ const SURFACES = {
       const c = [0, 0, 0];
       const phosphate = [0.052, 0.053, 0.058];
       const worn = [0.300, 0.305, 0.320];
+      const mic = micro(seed + 1);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -469,10 +532,10 @@ const SURFACES = {
           // phosphate coating is a crystalline deposit — worley, not fbm
           worleyCell(u * 200, v * 200, 200, seed, CELL);
           const crystal = smoothstep(0.0, 0.35, CELL[1] - CELL[0]);
-          const grain = vfbm2(u * 420, v * 420, { octaves: 2, period: 420, seed });
-          const machine = vfbm2(u * 900, v * 30, { octaves: 2, period: 900, seed: seed + 4 });
+          const grain = mA(mic, x, y);
+          const machine = mB(mic, x * 9, y);   // broach / machining lay
           const wear = smoothstep(0.60, 0.86, bs(wearB, u, v));
-          const pit = smoothstep(0.965, 1.0, value2(u * 300, v * 300, 300, seed + 7));
+          const pit = smoothstep(0.93, 1.0, mB(mic, x * 2 + 61, y * 2 + 17));
 
           height[i] = clamp01(0.55 + (crystal - 0.5) * 0.30 + (grain - 0.5) * 0.22 + (machine - 0.5) * 0.16 - pit * 0.55);
 
@@ -498,7 +561,7 @@ const SURFACES = {
    */
   sand: {
     amplitude: 0.022, tile: 8.0, detail: 'grain',
-    ao: { radiusMeters: 0.12, strength: 1.0, microStrength: 0.45 },
+    ao: { radiusTexels: 16, strength: 1.0, microStrength: 0.45 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -512,6 +575,7 @@ const SURFACES = {
       const pale = [0.680, 0.605, 0.470];
       const dark = [0.300, 0.245, 0.180];
       const peb = [0.400, 0.380, 0.352];
+      const mic = micro(seed + 4);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -524,10 +588,11 @@ const SURFACES = {
           const ripple = Math.pow(tri(u * 26 + flow * 7 + drift * 3), 0.75);
           const rippleAmp = smoothstep(0.25, 0.65, flow);
           const scuff = smoothstep(0.62, 0.88, bs(scuffB, u, v));
-          const grit = vfbm2(u * 400, v * 400, { octaves: 3, period: 400, seed });
-          worleyCell(u * 24, v * 24, 24, seed + 3, CELL);
-          const pebble = (1 - smoothstep(0.012, 0.055, CELL[0])) * smoothstep(0.72, 0.9, CELL[2]);
-          const sparkle = smoothstep(0.978, 1.0, value2(u * 700, v * 700, 700, seed + 8));
+          const grit = mA(mic, x, y);
+          scatter2(u * 24, v * 24, 24, seed + 3, CELL);
+          const pebble = stoneMask(CELL[2], CELL[3], CELL[1], 0.07 + CELL[1] * 0.09, (grit - 0.5) * 0.05)
+            * smoothstep(0.70, 0.90, CELL[1]);
+          const sparkle = smoothstep(0.94, 1.0, mB(mic, x, y));
 
           height[i] = clamp01(0.42
             + (drift - 0.5) * 0.55
@@ -564,7 +629,7 @@ const SURFACES = {
    */
   plaster: {
     amplitude: 0.008, tile: 4.5, detail: 'grain',
-    ao: { radiusMeters: 0.06, strength: 1.1, microStrength: 0.65 },
+    ao: { radiusTexels: 13, strength: 1.1, microStrength: 0.65 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -580,6 +645,7 @@ const SURFACES = {
       const c = [0, 0, 0];
       const block = [0.335, 0.268, 0.212];
       const wet = [0.240, 0.215, 0.180];
+      const mic = micro(seed + 6);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -589,8 +655,8 @@ const SURFACES = {
           const trowel = bs(trowelB, u, v);
           const spall = smoothstep(0.615, 0.700, bs(spallB, u, v));
           const mapCrack = smoothstep(0.83, 0.99, bs(crackB, u, v));
-          const sandGrain = vfbm2(u * 280, v * 280, { octaves: 3, period: 280, seed });
-          const pinhole = smoothstep(0.93, 1.0, value2(u * 380, v * 380, 380, seed + 2));
+          const sandGrain = mA(mic, x, y);
+          const pinhole = smoothstep(0.88, 1.0, mB(mic, x, y));
           const patch = bs(patchB, u, v);
 
           height[i] = clamp01(0.58
@@ -635,7 +701,7 @@ const SURFACES = {
    */
   corrugated: {
     amplitude: 0.045, tile: 3.0, detail: 'brushed',
-    ao: { radiusMeters: 0.12, strength: 1.0, microStrength: 0.4 },
+    ao: { radiusTexels: 16, strength: 1.0, microStrength: 0.4 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -649,6 +715,7 @@ const SURFACES = {
       const rustDark = [0.190, 0.082, 0.038];
       const rustMid = [0.330, 0.150, 0.062];
       const rustLt = [0.480, 0.265, 0.130];
+      const mic = micro(seed + 7);
 
       const RIBS = 5;
       for (let y = 0; y < size; y++) {
@@ -660,7 +727,7 @@ const SURFACES = {
           // flattened crest and valley is what makes it read as folded steel
           const rib = smootherstep(0.12, 0.88, tri(u * RIBS));
           const swage = 1 - smoothstep(0.0, 0.030, Math.abs(tri(v * 2) - 0.5) * 2);
-          const spangle = vfbm2(u * 320, v * 320, { octaves: 2, period: 320, seed });
+          const spangle = mA(mic, x, y);
           const crease = smoothstep(0.90, 1.0, bs(creaseB, u, v));
           const dent = bs(dentB, u, v), streakN = bs(streakB, u, v);
 
@@ -707,7 +774,7 @@ const SURFACES = {
    */
   brick: {
     amplitude: 0.014, tile: 3.0, detail: 'grain',
-    ao: { radiusMeters: 0.05, strength: 1.4, microStrength: 0.6 },
+    ao: { radiusTexels: 12, strength: 1.4, microStrength: 0.6 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -722,6 +789,7 @@ const SURFACES = {
       const darkBrick = [0.180, 0.086, 0.062];
       const paleBrick = [0.520, 0.330, 0.235];
       const freshClay = [0.560, 0.360, 0.270];
+      const mic = micro(seed + 9);
 
       const ROWS = 8, COLS = 4, JOINT = 0.055;
 
@@ -739,16 +807,18 @@ const SURFACES = {
           const bid = hash2(col, row, seed);
           const bid2 = hash2(col, row, seed + 77);
 
-          const wobble = (vfbm2(u * 60, v * 60, { octaves: 2, period: 60, seed: seed + 4 }) - 0.5) * 0.030;
+          const wobble = (mB(mic, x * 3, y * 3) - 0.5) * 0.030;
           const dxj = Math.min(fx, 1 - fx) + wobble;
           const dyj = Math.min(fy, 1 - fy) * (COLS / ROWS) + wobble;
           const dj = Math.min(dxj, dyj);
           const isMortar = 1 - smoothstep(JOINT * 0.55, JOINT * 1.25, dj);
           const arris = smoothstep(JOINT * 1.1, JOINT * 3.2, dj);
 
-          const clay = vfbm2(u * 200 + bid * 30, v * 200 + bid2 * 30, { octaves: 3, period: 200, seed: seed + 9 });
+          // offsetting the micro lookup per brick means no two bricks share
+          // the same grain, which is most of what stops brickwork looking stamped
+          const clay = mA(mic, x + ((bid * 211) | 0), y + ((bid2 * 197) | 0));
           const chip = smoothstep(0.72, 0.95, bs(chipB, u, v)) * (1 - arris) * (1 - isMortar);
-          const mortarSand = vfbm2(u * 340, v * 340, { octaves: 3, period: 340, seed: seed + 12 });
+          const mortarSand = mB(mic, x + 71, y + 113);
 
           const brickH = 0.72 + (bid - 0.5) * 0.10 + arris * 0.10 + (clay - 0.5) * 0.10 - chip * 0.35;
           const mortarH = 0.30 + (mortarSand - 0.5) * 0.12;
@@ -789,7 +859,7 @@ const SURFACES = {
    */
   wood: {
     amplitude: 0.006, tile: 2.4, detail: 'grain',
-    ao: { radiusMeters: 0.04, strength: 1.3, microStrength: 0.75 },
+    ao: { radiusTexels: 10, strength: 1.3, microStrength: 0.75 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -800,6 +870,7 @@ const SURFACES = {
       const grey = [0.310, 0.300, 0.285];
       const dark = [0.140, 0.092, 0.058];
       const knotC = [0.090, 0.055, 0.032];
+      const mic = micro(seed + 11);
 
       const BOARDS = 5, GAP = 0.022;
 
@@ -851,10 +922,10 @@ const SURFACES = {
           const gap = 1 - smoothstep(GAP * 0.5, GAP * 1.6, Math.min(fb, 1 - fb));
           const edge = smoothstep(GAP * 1.4, GAP * 6.0, Math.min(fb, 1 - fb));
           const ringSharp = Math.pow(clamp01(sampleRings(u, v)), 1.6);
-          const kn = worley2(u * 5 + bid, v * 4, 5, seed + 21);
-          const knot = (1 - smoothstep(0.02, 0.10, kn.f1)) * smoothstep(0.55, 0.75, hash2((u * 5) | 0, (v * 4) | 0, seed + 33));
+          scatter2(u * 5 + bid, v * 4, 5, seed + 21, CELL);
+          const knot = (1 - smoothstep(0.04, 0.13, CELL[0])) * smoothstep(0.62, 0.80, CELL[1]);
           const split = smoothstep(0.90, 1.0, bs(splitB, u, v)) * smoothstep(0.4, 0.8, bid2);
-          const fibre = vfbm2(u * 90, v * 900, { octaves: 2, period: 900, seed: seed + 5 });
+          const fibre = mB(mic, x, y * 8);     // fibre runs the length of the board
 
           height[i] = clamp01(0.66
             + (ringSharp - 0.5) * 0.26     // latewood stands proud on weathered timber
@@ -899,7 +970,7 @@ const SURFACES = {
    */
   fabric: {
     amplitude: 0.005, tile: 1.6, detail: 'weave',
-    ao: { radiusMeters: 0.02, strength: 1.2, microStrength: 0.9 },
+    ao: { radiusTexels: 8, strength: 1.2, microStrength: 0.9 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -908,6 +979,7 @@ const SURFACES = {
       const dirtB = band(MACRO, (u, v) => fbm2(u * 5 + 2, v * 3, { octaves: 4, period: 5 }));
       const fadeB = band(32, (u, v) => fbm2(u * 2 + 7, v * 2, { octaves: 3, period: 2 }));
       const c = [0, 0, 0];
+      const mic = micro(seed + 13);
 
       const THREADS = 96;
       for (let y = 0; y < size; y++) {
@@ -925,7 +997,7 @@ const SURFACES = {
           const weave = over ? warpT * 0.85 + weftT * 0.3 : weftT * 0.85 + warpT * 0.3;
           const threadVar = hash2(iu, iv, seed) * 0.25;
 
-          const fuzz = vfbm2(u * 500, v * 500, { octaves: 2, period: 500, seed: seed + 3 });
+          const fuzz = mB(mic, x, y);
           const seam = 1 - smoothstep(0.0, 0.012, Math.abs(tri(v * 3) - 0.5) * 2);
           const fold = bs(foldB, u, v);
           const wear = smoothstep(0.70, 0.92, fold);
@@ -963,7 +1035,7 @@ const SURFACES = {
    */
   gravel: {
     amplitude: 0.038, tile: 4.0, detail: 'grain',
-    ao: { radiusMeters: 0.09, strength: 1.45, microStrength: 0.8 },
+    ao: { radiusTexels: 16, strength: 1.45, microStrength: 0.8 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -978,48 +1050,72 @@ const SURFACES = {
       const stoneA = [0.400, 0.385, 0.360];
       const stoneB = [0.290, 0.255, 0.222];
       const wet = [0.090, 0.072, 0.058];
+      const mic = micro(seed + 2);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
         for (let x = 0; x < size; x++) {
           const i = y * size + x;
           const u = x / size;
-          // three stone grades; a cell only becomes a stone if its random
+          // Three stone grades. A cell only becomes a stone if its random
           // passes a threshold, so the fines matrix between them stays visible
-          worleyCell(u * 18, v * 18, 18, seed, CELL);
-          const s1 = (1 - smoothstep(0.02, 0.16, CELL[0])) * smoothstep(0.55, 0.80, CELL[2]);
-          const s1id = CELL[2];
-          worleyCell(u * 44, v * 44, 44, seed + 5, CELL);
-          const s2 = (1 - smoothstep(0.015, 0.13, CELL[0])) * smoothstep(0.40, 0.70, CELL[2]);
-          const s2id = CELL[2];
-          worleyCell(u * 110, v * 110, 110, seed + 9, CELL);
-          const s3 = (1 - smoothstep(0.01, 0.10, CELL[0])) * smoothstep(0.35, 0.65, CELL[2]);
-
-          const fines = vfbm2(u * 260, v * 260, { octaves: 3, period: 260, seed: seed + 2 });
+          // — stones that fill the plane read as crazy paving, not as gravel.
+          // Stones pack the surface — the fines only show through the gaps.
+          // Sparse stones on a mud field is what wet earth looks like, not
+          // what a gravel hardstanding looks like, and the difference is
+          // almost entirely the coverage fraction.
+          const fines = mA(mic, x, y);
+          const jag = (fines - 0.5);
+          scatter2(u * 20, v * 20, 20, seed, CELL);
+          const s1id = CELL[1];
+          const r1 = 0.24 + s1id * 0.32;
+          const s1 = stoneMask(CELL[2], CELL[3], s1id, r1, jag * r1 * 0.55) * smoothstep(0.08, 0.28, s1id);
+          scatter2(u * 46, v * 46, 46, seed + 5, CELL);
+          const s2id = CELL[1];
+          const r2 = 0.19 + s2id * 0.28;
+          const s2 = stoneMask(CELL[2], CELL[3], s2id, r2, jag * r2 * 0.55) * smoothstep(0.06, 0.26, s2id);
+          scatter2(u * 105, v * 105, 105, seed + 9, CELL);
+          const s3id = CELL[1];
+          const s3 = stoneMask(CELL[2], CELL[3], s3id, 0.15 + s3id * 0.14, jag * 0.09) * smoothstep(0.08, 0.32, s3id);
           const craze = smoothstep(0.86, 1.0, bs(crazeB, u, v));
           const hollow = bs(hollowB, u, v);
           const rutK = smoothstep(0.6, 0.92, bs(rutB, u, v));
 
-          height[i] = clamp01(0.34
-            + (hollow - 0.5) * 0.45
-            + s1 * 0.55 + s2 * 0.32 + s3 * 0.16
+          height[i] = clamp01(0.22
+            + (hollow - 0.5) * 0.30
+            + s1 * 0.62 + s2 * 0.38 + s3 * 0.20
             + (fines - 0.5) * 0.08
-            - craze * 0.12
-            - rutK * 0.20);
+            - craze * 0.10
+            - rutK * 0.16);
 
-          const wetK = smoothstep(0.20, 0.05, hollow);   // water pools in the hollows
-          lerp3(c, soil, dust, smoothstep(0.35, 0.85, bs(dustB, u, v)) * 0.8 + (fines - 0.5) * 0.4);
-          lerp3(c, c, stoneA, clamp01(s1 * smoothstep(0.4, 0.8, s1id) + s3 * 0.5));
-          lerp3(c, c, stoneB, clamp01(s2 * (1 - smoothstep(0.4, 0.8, s2id))));
-          const sh = 0.86 + (fines - 0.5) * 0.24 + (hollow - 0.5) * 0.18;
+          const wetK = smoothstep(0.22, 0.06, hollow);   // water pools in the hollows
+          lerp3(c, soil, dust, smoothstep(0.35, 0.85, bs(dustB, u, v)) * 0.7 + (fines - 0.5) * 0.5);
+          // per-stone tone: limestone through to dark basalt, plus the odd
+          // brick fragment, all from the one cell random
+          const k1 = clamp01(s1);
+          lerp3(c, c, s1id > 0.72 ? stoneB : stoneA, k1 * 0.95);
+          if (k1 > 0.05) {
+            const t1 = 0.62 + s1id * 0.80;
+            c[0] *= mix(1, t1, k1); c[1] *= mix(1, t1 * 0.99, k1); c[2] *= mix(1, t1 * 0.96, k1);
+          }
+          const k2 = clamp01(s2) * (1 - k1);
+          lerp3(c, c, s2id > 0.62 ? stoneA : stoneB, k2 * 0.9);
+          if (k2 > 0.05) {
+            const t2 = 0.60 + s2id * 0.85;
+            c[0] *= mix(1, t2, k2); c[1] *= mix(1, t2, k2); c[2] *= mix(1, t2 * 0.97, k2);
+          }
+          const k3 = clamp01(s3) * (1 - k1) * (1 - k2);
+          lerp3(c, c, stoneA, k3 * (0.4 + s3id * 0.6));
+          const sh = 0.84 + (fines - 0.5) * 0.30 + (hollow - 0.5) * 0.14;
           c[0] *= sh; c[1] *= sh; c[2] *= sh;
           lerp3(c, c, wet, wetK * 0.85);
           c[0] *= 1 - craze * 0.25; c[1] *= 1 - craze * 0.25; c[2] *= 1 - craze * 0.25;
           writeRGB(rgb, i, c[0], c[1], c[2]);
 
-          let r = 0.96 + (fines - 0.5) * 0.06;
-          r = mix(r, 0.45, clamp01(s1 + s2 * 0.6) * 0.5);   // washed stone faces
-          r = mix(r, 0.14, wetK);                           // standing water
+          let r = 0.97 + (fines - 0.5) * 0.08;
+          r = mix(r, 0.42 + s1id * 0.26, k1 * 0.85);        // washed stone faces
+          r = mix(r, 0.48 + s2id * 0.24, k2 * 0.75);
+          r = mix(r, 0.12, wetK);                           // standing water
           rough[i] = clamp01(mix(r, 0.80, rutK * 0.5));
           metal[i] = 0;
         }
@@ -1040,7 +1136,7 @@ const SURFACES = {
    */
   tile: {
     amplitude: 0.005, tile: 2.0, detail: 'grain',
-    ao: { radiusMeters: 0.03, strength: 1.4, microStrength: 0.5 },
+    ao: { radiusTexels: 11, strength: 1.4, microStrength: 0.5 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -1054,6 +1150,7 @@ const SURFACES = {
       const c = [0, 0, 0];
       const grout = [0.330, 0.318, 0.298];
       const chipC = [0.560, 0.520, 0.470];
+      const mic = micro(seed + 3);
 
       const N = 4, JOINT = 0.030;
       for (let y = 0; y < size; y++) {
@@ -1066,7 +1163,7 @@ const SURFACES = {
           const tid = hash2(ix, iy, seed);
           const tid2 = hash2(ix, iy, seed + 41);
 
-          const wob = (vfbm2(u * 80, v * 80, { octaves: 2, period: 80, seed: seed + 7 }) - 0.5) * 0.012;
+          const wob = (mB(mic, x * 2, y * 2) - 0.5) * 0.012;
           const dj = Math.min(Math.min(fx, 1 - fx), Math.min(fy, 1 - fy)) + wob;
           const isGrout = 1 - smoothstep(JOINT * 0.6, JOINT * 1.3, dj);
           const bevel = smoothstep(JOINT * 1.2, JOINT * 3.0, dj);
@@ -1074,7 +1171,7 @@ const SURFACES = {
           const bodyNoise = bs(bodyB, u, v);
           const craze = smoothstep(0.90, 1.0, bs(crazeB, u, v)) * (1 - isGrout);
           const chip = (1 - bevel) * smoothstep(0.55, 0.85, bs(chipB, u, v)) * smoothstep(0.6, 0.9, tid2);
-          const groutSand = vfbm2(u * 300, v * 300, { octaves: 3, period: 300, seed: seed + 3 });
+          const groutSand = mA(mic, x + 37, y + 91);
 
           const tileH = 0.80 + (tid - 0.5) * 0.05 + bevel * 0.10 - chip * 0.5 - craze * 0.06;
           const groutH = 0.30 + (groutSand - 0.5) * 0.16;
@@ -1113,7 +1210,7 @@ const SURFACES = {
    */
   roadLine: {
     amplitude: 0.010, tile: 6.0, detail: 'grain',
-    ao: { radiusMeters: 0.045, strength: 1.2, microStrength: 0.8 },
+    ao: { radiusTexels: 12, strength: 1.2, microStrength: 0.8 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -1125,6 +1222,7 @@ const SURFACES = {
       const c = [0, 0, 0], pc = [0, 0, 0];
       const tar = [0.052, 0.052, 0.056];
       const stone = [0.290, 0.280, 0.266];
+      const mic = micro(seed + 5);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -1132,9 +1230,9 @@ const SURFACES = {
           const i = y * size + x;
           const u = x / size;
 
-          worleyCell(u * 34, v * 34, 34, seed, CELL);
-          const bigStone = (1 - smoothstep(0.02, 0.20, CELL[0])) * smoothstep(0.30, 0.75, CELL[2]);
-          const grain = vfbm2(u * 340, v * 340, { octaves: 3, period: 340, seed: seed + 5 });
+          scatter2(u * 34, v * 34, 34, seed, CELL);
+          const bigStone = (1 - smoothstep(0.06, 0.21, CELL[0])) * smoothstep(0.30, 0.75, CELL[1]);
+          const grain = mA(mic, x, y);
           const patch = bs(patchB, u, v);
           const exposure = smoothstep(0.35, 0.75, patch);
           lerp3(c, tar, stone, clamp01(bigStone * exposure + exposure * 0.25));
@@ -1144,14 +1242,14 @@ const SURFACES = {
           let r = 0.96 - exposure * 0.04 + (grain - 0.5) * 0.10;
 
           // the marking — soft-edged, because sprayed paint always oversprays
-          const ragged = (vfbm2(u * 40, v * 60, { octaves: 2, period: 60, seed: seed + 3 }) - 0.5) * 0.020;
+          const ragged = (mB(mic, x, y * 2) - 0.5) * 0.020;
           let bandK = 1 - smoothstep(halfW - 0.012, halfW + 0.006, Math.abs(u - 0.5) + ragged);
           if (dashed) bandK *= smoothstep(0.10, 0.20, tri(v));
           const abrade = smoothstep(0.42, 0.78, bs(wearB, u, v)) * (0.35 + bigStone * 0.9);
           const cover = clamp01(bandK * (1 - abrade));
 
           if (cover > 0.001) {
-            const beads = smoothstep(0.965, 1.0, value2(u * 500, v * 500, 500, seed + 13));
+            const beads = smoothstep(0.92, 1.0, mB(mic, x + 53, y + 29));
             const dirty = smoothstep(0.4, 0.9, patch) * 0.22;
             pc[0] = paint[0] * (1 - dirty); pc[1] = paint[1] * (1 - dirty * 1.05); pc[2] = paint[2] * (1 - dirty * 1.15);
             lerp3(c, c, pc, cover);
@@ -1181,7 +1279,7 @@ const SURFACES = {
    */
   rustedIron: {
     amplitude: 0.005, tile: 2.0, detail: 'grain',
-    ao: { radiusMeters: 0.03, strength: 1.35, microStrength: 0.85 },
+    ao: { radiusTexels: 11, strength: 1.35, microStrength: 0.85 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -1193,6 +1291,7 @@ const SURFACES = {
       const mdRust = [0.300, 0.132, 0.056];
       const ltRust = [0.500, 0.280, 0.130];
       const powder = [0.360, 0.200, 0.115];
+      const mic = micro(seed + 2);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -1204,8 +1303,8 @@ const SURFACES = {
           const flakeId = CELL[2];
           worleyCell(u * 70, v * 70, 70, seed + 6, CELL);
           const subFlake = 1 - smoothstep(0.0, 0.08, CELL[1] - CELL[0]);
-          const crust = vfbm2(u * 260, v * 260, { octaves: 3, period: 260, seed: seed + 2 });
-          const pit = smoothstep(0.88, 1.0, value2(u * 200, v * 200, 200, seed + 11));
+          const crust = mA(mic, x, y);
+          const pit = smoothstep(0.84, 1.0, mB(mic, x + 17, y + 43));
 
           const front = bs(frontB, u, v);
           const corr = smoothstep(0.34, 0.62, front);
@@ -1246,7 +1345,7 @@ const SURFACES = {
    */
   glass: {
     amplitude: 0.0006, tile: 2.0, detail: 'grain',
-    ao: { radiusMeters: 0.02, strength: 0.35, microStrength: 0.2 },
+    ao: { radiusTexels: 8, strength: 0.35, microStrength: 0.2 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
@@ -1255,6 +1354,7 @@ const SURFACES = {
       const edgeB = band(MACRO, (u, v) => fbm2(u * 6, v * 6, { octaves: 3, period: 6 }));
       const runB = band(M, (u, v) => fbm2(u * 40, v * 1.5, { octaves: 4, period: 40 }));
       const crackB = band(M, (u, v) => ridged2(u * 8, v * 8, { octaves: 4, period: 8 }));
+      const mic = micro(seed + 8);
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
@@ -1262,8 +1362,8 @@ const SURFACES = {
           const i = y * size + x;
           const u = x / size;
           const runoff = smoothstep(0.55, 0.95, bs(runB, u, v));
-          const dust = vfbm2(u * 220, v * 220, { octaves: 3, period: 220, seed });
-          const speck = smoothstep(0.975, 1.0, value2(u * 400, v * 400, 400, seed + 4));
+          const dust = mA(mic, x, y);
+          const speck = smoothstep(0.94, 1.0, mB(mic, x, y));
           const crack = smoothstep(0.955, 1.0, bs(crackB, u, v));
           // dirt banks up in the frame rebate around the pane
           const rebate = smoothstep(0.5, 0.0, Math.min(Math.min(u, 1 - u), Math.min(v, 1 - v)) * 8)
@@ -1397,7 +1497,7 @@ export function generateSurface(name, size, seed = 1, opts = {}) {
   const out = def.gen(size, seed, opts);
   const normal = heightToNormalWorld(out.height, size, amplitude, tileMeters, opts.normalStrength ?? 1.0);
   const ao = horizonAO(out.height, size, amplitude, tileMeters, {
-    radiusMeters: def.ao?.radiusMeters ?? 0.06,
+    radiusTexels: def.ao?.radiusTexels ?? 11,
     microStrength: def.ao?.microStrength ?? 0.6,
     strength: (def.ao?.strength ?? 1.0) * (opts.aoStrength ?? 1.0),
     workSize: size <= 512 ? 192 : 256,

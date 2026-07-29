@@ -78,8 +78,8 @@ export class Level {
       concF: b.mat('concreteFloor'),
       plasterA: b.mat('plasterWarm'),
       plasterB: b.mat('plasterPale'),
-      brick: b.mat('brick'),
-      brickPale: b.mat('brickPale'),
+      brick: b.mat('brickPale'),          // the muted variant is the default
+      brickHot: b.mat('brick'),             // saturated red, used as a rare accent
       tile: b.mat('tile'),
       wood: b.mat('wood'),
       glass: b.mat('glass'),
@@ -95,7 +95,17 @@ export class Level {
     this.M.scorch = b.tinted('__scorch', 'road', 0x3a352e, { roughness: 1.0, tile: 4 });
     this.M.bag = b.tinted('__sandbag', 'tarp', 0xb9a682, { roughness: 1.0, tile: 0.9 });
     this.M.cloth = b.tinted('__cloth', 'tarp', 0xd6cec0, { roughness: 1.0, side: THREE.DoubleSide, tile: 1.1 });
-    this.M.tarpB = b.tinted('__tarpBlue', 'tarp', 0x5d7488, { roughness: 1.0, side: THREE.DoubleSide, tile: 2 });
+    this.M.tarpB = b.tinted('__tarpBlue', 'tarp', 0x8d99a0, { roughness: 1.0, side: THREE.DoubleSide, tile: 2 });
+    this.M.cloth2 = b.tinted('__cloth2', 'tarp', 0xa8b0ae, { roughness: 1.0, side: THREE.DoubleSide, tile: 1.1 });
+    // Props are small; a 2 m texture tile on a 0.6 m crate shows one flat patch
+    // of it. These variants exist purely to fix texel density on small objects.
+    this.M.woodProp = b.tinted('__woodProp', 'wood', 0xffffff, { tile: 0.7 });
+    this.M.steelProp = b.tinted('__steelProp', 'rustedIron', 0xffffff, { tile: 0.8 });
+    this.M.busBody = b.tinted('__busBody', 'rustySteel', 0xf0e2c4, { tile: 1.4 });
+    // Container corrugation needs a ~0.3 m rib pitch, not 3 m, and the stock
+    // red is far too hot for this palette.
+    this.M.cRed = b.tinted('__cRed', 'containerRed', 0xa89086, { tile: 1.0 });
+    this.M.cBlue = b.tinted('__cBlue', 'containerBlue', 0x9aa6ac, { tile: 1.0 });
     this.M.wire = b.tinted('__wire', 'gunmetal', 0x2a2a2c, { roughness: 0.8, metalness: 0.5, tile: 1 });
     this.M.trim = this.M.conc;
 
@@ -270,7 +280,7 @@ export class Level {
     // reading as one tall extrusion.
     for (let fl = 1; fl < floors; fl++) {
       const y = y0 + fl * fh - 0.12;
-      b.aabb(trim, x0 - 0.1, y, z0 - 0.1, x1 + 0.1, y + 0.16, z1 + 0.1, { collide: false });
+      b.aabb(trim, x0 - 0.07, y, z0 - 0.07, x1 + 0.07, y + 0.13, z1 + 0.07, { collide: false });
     }
 
     // Interior floors + occlusion core.
@@ -295,7 +305,20 @@ export class Level {
     // Roof: slab, parapet, coping, clutter.
     if (o.roof !== false) {
       const roofY = y0 + H;
-      b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, z1);
+      const hole = o.roofHole;
+      if (hole) {
+        // Slab in four pieces around an opening. A hole in a reachable roof is
+        // worth the extra boxes: it is a firing position down into the floor
+        // below, and it is somewhere for a shaft of light to land.
+        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, hole.z0);
+        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z1, x1, roofY, z1);
+        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z0, hole.x0, roofY, hole.z1);
+        b.aabb(this.M.concF, hole.x1, roofY - 0.3, hole.z0, x1, roofY, hole.z1);
+        P.rebar(b, this.M.steelProp, (hole.x0 + hole.x1) / 2, roofY - 0.3, hole.z0, 8, hole.x1 - hole.x0, 0.8, R);
+        P.rebar(b, this.M.steelProp, hole.x1, roofY - 0.3, (hole.z0 + hole.z1) / 2, 6, hole.z1 - hole.z0, 0.7, R);
+      } else {
+        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, z1);
+      }
       const pt = 0.3, ph = o.parapet ?? 0.9;
       b.aabb(mat, x0, roofY, z0, x1, roofY + ph, z0 + pt);
       b.aabb(mat, x0, roofY, z1 - pt, x1, roofY + ph, z1);
@@ -346,10 +369,77 @@ export class Level {
       else if (r < 0.55) P.acUnit(b, this.M.rust, this.M.dark, x, y, z, R() * 3, collide);
       else if (r < 0.72) P.satelliteDish(b, this.M.concF, x, y, z, R() * 6.2, 0.45 + R() * 0.3);
       else if (r < 0.86) b.box(this.M.conc, x, y, z, 1.4 + R(), 1.0 + R() * 0.8, 1.3 + R(), R() * 3, C); // stair headhouse
-      else P.crateStack(b, this.M.wood, x, y, z, R() * 3, R, collide);
+      else P.crateStack(b, this.M.woodProp, x, y, z, R() * 3, R, collide);
     }
     // A slack aerial cable or two.
     if (R() < 0.7) P.wire(b, this.M.wire, x0, y + 1.6, z0, x1, y + 1.4, z1, 0.6, 5);
+  }
+
+  /**
+   * A run of arched piers carrying a first floor. This is the most useful piece
+   * of architecture in the level's vocabulary: it separates two spaces without
+   * blocking either the route or the sightline, it caps the top of a frame from
+   * underneath, and it lays alternating bars of light and shade across the
+   * ground, which is most of what "dressed" looks like.
+   *
+   * @param p       fixed coordinate (x for a 'z'-running arcade)
+   * @param a0,a1   extent along the running axis
+   * @param depth   pier depth
+   * @param clear   head height of the openings
+   */
+  _arcade(p, a0, a1, depth, clear, axis) {
+    const b = this.b, R = () => this.rng();
+    const mat = this.M.plasterA;
+    const pierW = 0.9, bay = 3.4;
+    const n = Math.max(2, Math.round((a1 - a0) / bay));
+    const step = (a1 - a0) / n;
+    const put = (c, w, y, h, m, dd) => {
+      if (axis === 'z') b.aabb(m, p - dd / 2, y, c - w / 2, p + dd / 2, y + h, c + w / 2);
+      else b.aabb(m, c - w / 2, y, p - dd / 2, c + w / 2, y + h, p + dd / 2);
+    };
+    for (let i = 0; i <= n; i++) {
+      const c = a0 + step * i;
+      put(c, pierW, 0, clear, mat, depth);
+      put(c, pierW + 0.24, 0, 0.5, this.M.brick, depth + 0.24);          // pier base
+      put(c, pierW + 0.2, clear - 0.28, 0.28, this.M.concF, depth + 0.2); // impost
+    }
+    // Segmental heads over each bay, cut as slabs.
+    const span = step - pierW, rr = span / 2;
+    for (let i = 0; i < n; i++) {
+      const c = a0 + step * (i + 0.5);
+      for (let k = 0; k < 8; k++) {
+        const y = clear + (rr * k) / 8;
+        const hw = Math.sqrt(Math.max(0, rr * rr - Math.pow(y - clear, 2)));
+        const sh = rr / 8 + 0.02;
+        put(c - (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth);
+        put(c + (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth);
+      }
+    }
+    // Spandrel, first-floor slab and the wall above, pierced by small windows.
+    const springTop = clear + rr;
+    put((a0 + a1) / 2, a1 - a0, springTop, 0.55, mat, depth);
+    put((a0 + a1) / 2, a1 - a0 + 0.4, springTop + 0.55, 0.3, this.M.concF, depth + 0.4);
+    const wallY = springTop + 0.85;
+    const ops = [];
+    for (let i = 0; i < n; i++) {
+      const c = a0 + step * (i + 0.5);
+      ops.push({ c, w: 1.2, y: wallY + 0.95, h: 1.5 });
+      this._reveal(axis === 'z' ? 'z' : 'x', c, axis === 'z' ? p - depth / 2 : p - depth / 2, wallY + 0.95, 1.2, 1.5, 0.4, -1);
+    }
+    this._wall(mat, axis === 'z' ? 'z' : 'x', a0, a1, p, wallY, 3.6, depth * 0.55, ops);
+    put((a0 + a1) / 2, a1 - a0 + 0.3, wallY + 3.6, 0.75, mat, depth * 0.6);
+    put((a0 + a1) / 2, a1 - a0 + 0.5, wallY + 4.35, 0.16, this.M.concF, depth * 0.7);
+    // Under-arcade dressing: shade, crates, a hanging lamp per bay.
+    for (let i = 0; i < n; i++) {
+      const c = a0 + step * (i + 0.5);
+      if (R() < 0.5) P.crateStack(b, this.M.woodProp, axis === 'z' ? p : c, 0, axis === 'z' ? c : p, R() * 3, R);
+      if (R() < 0.4) {
+        const lx = axis === 'z' ? p : c, lz = axis === 'z' ? c : p;
+        b.box(this.M.steelProp, lx, clear - 0.9, lz, 0.05, 0.9, 0.05, 0, { collide: false });
+        b.box(this.M.steelProp, lx, clear - 1.15, lz, 0.3, 0.25, 0.3, 0, { collide: false });
+      }
+    }
+    for (let i = 0; i <= n; i++) this._cover(axis === 'z' ? p : a0 + step * i, axis === 'z' ? a0 + step * i : p);
   }
 
   /** Straight run of steps. Each riser is mantle-legal on its own. */
@@ -536,8 +626,8 @@ export class Level {
     //     and one ground-floor shop the player can walk into.
     this._block({
       x0: -28, x1: -KERB, z0: 22, z1: 33.5, floors: 3, mat: this.M.plasterA,
-      open: ['+x', '+z'], balcony: true, noGround: ['+x'], hollowFloors: 1,
-      doors: [{ face: '+x', c: 24.6, w: 1.6, h: 2.5 }],
+      open: ['+x', '+z', '-z'], balcony: true, noGround: ['+x'], hollowFloors: 1,
+      doors: [{ face: '+x', c: 24.6, w: 1.6, h: 2.5 }, { face: '-z', c: -16.0, w: 1.6 }],
       extra: [
         { face: '+x', c: 28.4, w: 3.6, y: 0.02, h: 2.7 },   // shopfront
         { face: '+x', c: 31.6, w: 2.0, y: 0.95, h: 1.7 },   // side window
@@ -554,12 +644,13 @@ export class Level {
     });
 
     // Alley A (z 40..46) — a real gap in the wall, 6 m wide, running west.
-    this._block({ x0: -30, x1: -KERB, z0: 46, z1: 62, floors: 2, mat: this.M.plasterB, open: ['+x', '-z', '+z'], balcony: true, doors: [{ face: '+x', c: 50.5, w: 1.6, h: 2.5 }] });
+    this._block({ x0: -30, x1: -KERB, z0: 46, z1: 56, floors: 4, mat: this.M.plasterB, open: ['+x', '-z', '+z'], balcony: true, doors: [{ face: '+x', c: 50.5, w: 1.6, h: 2.5 }] });
+    this._block({ x0: -30, x1: -KERB, z0: 57, z1: 62, floors: 2, mat: this.M.brick, open: ['+x', '-z', '+z'] });
     // Alley walls get their own texture change + service clutter.
     for (let z = 41; z < 45.5; z += 1.6) {
       if (R() < 0.5) P.cylinder(b, this.M.rust, -14 - R() * 12, 0, z, 0.05, 5, null, { collide: false });
     }
-    P.laundry(b, this.M.wire, this.M.cloth, -12.5, 6.4, 42.0, -25, 5.9, 43.4, R);
+    P.laundry(b, this.M.wire, this.M.cloth2, -12.5, 6.4, 42.0, -25, 5.9, 43.4, R);
     P.laundry(b, this.M.wire, this.M.cloth, -13.5, 4.2, 44.6, -26, 4.6, 43.0, R);
 
     // Rubble choke halfway down alley A: you can climb it but not sprint it.
@@ -567,7 +658,7 @@ export class Level {
 
     // --- The stepped mass that lets you reach the gatehouse roof from the west
     //     shophouse: crates -> low roof (5.2) -> mantle -> parapet.
-    P.crateStack(b, this.M.wood, -12.2, PAVE_Y, 60.5, 0.3, R);
+    P.crateStack(b, this.M.woodProp, -12.2, PAVE_Y, 60.5, 0.3, R);
     b.box(this.M.conc, -12.6, PAVE_Y, 58.6, 2.4, 1.35, 2.2, 0.1);
     b.box(this.M.conc, -12.9, PAVE_Y + 1.35, 57.0, 2.0, 1.3, 2.0, -0.15);
 
@@ -588,18 +679,34 @@ export class Level {
     const b = this.b, R = () => this.rng();
     const cz = (z0 + z1) / 2;
     // Worn tile floor over the shell's slab.
-    b.plane(this.M.tile, (x0 + x1) / 2, 0.03, cz, x1 - x0 - 0.5, z1 - z0 - 0.5, 0, { collide: false });
+    b.aabb(this.M.tile, x0, -0.2, z0, x1, 0.09, z1);   // raised slab, clear of the terrain
 
     // Back partition with a doorway — depth inside the room.
     this._wall(this.M.plasterB, 'z', z0 + 0.4, z1 - 0.4, x0 + 3.2, 0, 3.05, 0.22,
       [{ c: cz + 1.6, w: 1.1, y: 0.02, h: 2.2 }]);
-    // Collapsed section of the ceiling slab lets a shaft of light into the back.
-    P.rebar(b, this.M.rust, x0 + 1.6, 3.05, z0 + 2.4, 9, 1.8, 0.9, R);
+    // A hole punched through the ceiling slab into the flat above: the one
+    // place in the level where a shaft of daylight lands on an interior floor.
+    const hx = x0 + 2.2, hz = z0 + 2.6;
+    b.aabb(this.M.concF, x0, 3.05, z0, x1, 3.3, hz - 1.4);
+    b.aabb(this.M.concF, x0, 3.05, hz + 1.4, x1, 3.3, z1);
+    b.aabb(this.M.concF, x0, 3.05, hz - 1.4, hx - 1.5, 3.3, hz + 1.4);
+    b.aabb(this.M.concF, hx + 1.5, 3.05, hz - 1.4, x1, 3.3, hz + 1.4);
+    P.rebar(b, this.M.steelProp, hx, 3.05, hz - 1.4, 10, 2.6, 0.9, R);
+    P.rebar(b, this.M.steelProp, hx - 1.5, 3.05, hz, 6, 1.2, 0.8, R);
+    // The rubble that came down with it, piled under the hole.
+    for (let i = 0; i < 26; i++) {
+      const a = R() * Math.PI * 2, rr = R() * 2.2, sz = 0.14 + R() * 0.5;
+      b.box(this.M.concF, hx + Math.cos(a) * rr, 0.09, hz + Math.sin(a) * rr,
+        sz * 1.6, sz * 0.7, sz * 1.4, R() * 3, { collide: false });
+    }
+    b.box(this.M.concF, hx + 0.4, 0.09, hz - 0.3, 1.9, 0.34, 1.5, 0.4);
+    // Blown-in render and a cracked-open patch of blockwork on the side wall.
+    b.box(this.M.brick, x0 + 0.06, 1.1, z1 - 2.6, 0.1, 1.8, 2.4, 0, { collide: false });
 
     // Steel roller shutter half-open over the shopfront.
     b.box(this.M.rust, -10.55, 2.35, 28.4, 0.14, 0.42, 3.7, 0, { collide: false });
     for (let i = 0; i < 4; i++) b.box(this.M.rust, -10.5, 1.95 + i * 0.1, 28.4, 0.06, 0.06, 3.6, 0, { collide: false });
-    P.awning(b, this.M.tarp, this.M.rust, -9.6, 3.35, 28.4, 4.6, 1.9, -Math.PI / 2);
+    P.awning(b, this.M.tarp, this.M.steelProp, -9.6, 3.35, 28.4, 4.6, 1.9, -Math.PI / 2);
     // Shop sign board.
     b.box(this.M.wood, -10.5, 2.95, 24.6, 0.1, 0.75, 3.2, 0, { collide: false });
 
@@ -610,11 +717,21 @@ export class Level {
       b.box(this.M.wood, x0 + 1.3, 0.42 + i * 0.42, cz + 2.2, 0.62, 0.05, 3.0, 0, { collide: false });
     }
     b.box(this.M.wood, x0 + 6.0, 0, z0 + 1.6, 1.5, 0.76, 0.9, 0.3);        // table
-    P.chair(b, this.M.wood, x0 + 7.4, 0, cz + 1.0, 0.7, true);
-    P.chair(b, this.M.wood, x0 + 5.6, 0, z0 + 2.9, 2.1, false);
-    P.crateStack(b, this.M.wood, x1 - 1.6, 0, z0 + 1.4, 0.4, R);
-    P.crateStack(b, this.M.wood, x0 + 1.3, 0, z1 - 1.6, 1.1, R);
-    P.oilDrum(b, this.M.rust, x0 + 2.0, 0, z1 - 2.6, 0, false);
+    P.chair(b, this.M.woodProp, x0 + 7.4, 0, cz + 1.0, 0.7, true);
+    P.chair(b, this.M.woodProp, x0 + 5.6, 0, z0 + 2.9, 2.1, false);
+    P.crateStack(b, this.M.woodProp, x1 - 1.6, 0, z0 + 1.4, 0.4, R);
+    P.crateStack(b, this.M.woodProp, x0 + 1.3, 0, z1 - 1.6, 1.1, R);
+    P.oilDrum(b, this.M.steelProp, x0 + 2.0, 0, z1 - 2.6, 0, false);
+    P.oilDrum(b, this.M.steelProp, x0 + 2.7, 0, z1 - 1.9, 1.2, true);
+    P.pallet(b, this.M.woodProp, x0 + 7.0, 0.1, z1 - 1.8, 0.9);
+    P.tyre(b, this.M.dark, x0 + 8.2, 0.1, z0 + 3.4, 0.6, true);
+    // A fridge and a hanging strip light, both wrecked.
+    b.box(this.M.steelProp, x0 + 1.1, 0, z0 + 1.5, 0.7, 1.7, 0.75, 0.25);
+    b.box(this.M.wire, x0 + 5.0, 2.75, cz, 0.05, 0.3, 0.05, 0, { collide: false });
+    b.box(this.M.steelProp, x0 + 5.0, 2.6, cz, 0.12, 0.12, 1.5, 0.05, { collide: false });
+    // Hanging cable loops across the ceiling.
+    P.wire(b, this.M.wire, x0 + 0.4, 2.95, z0 + 0.6, x1 - 0.4, 2.95, z0 + 1.4, 0.35, 5);
+    P.wire(b, this.M.wire, x0 + 0.4, 2.9, z1 - 1.2, x1 - 0.4, 2.95, z1 - 0.5, 0.4, 5);
     // Rubble, papers and a shaft-catching dust of debris on the floor.
     for (let i = 0; i < 46; i++) {
       b.plane(this.M.cloth, x0 + 0.6 + R() * (x1 - x0 - 1.2), 0.05, z0 + 0.6 + R() * (z1 - z0 - 1.2),
@@ -641,8 +758,10 @@ export class Level {
     this._block({
       x0: KERB, x1: 28, z0: 16, z1: 30, floors: 2, floorH: 3.3, mat: this.M.plasterB,
       open: ['-x', '+z', '-z'], parapet: 0.85, walkableRoof: true,
+      roofHole: { x0: 17.5, x1: 21.5, z0: 20.5, z1: 24.0 },
       doors: [{ face: '-x', c: 20.5, w: 1.6 }],
     });
+    this._eaRoof(6.6);
     // Shear the corner off: a wedge of missing wall with exposed floor slabs.
     this._collapseCorner(KERB, 30, 1, -1, 7.5, 6.6);
     this._rubbleRamp(11.4, 32.6, 0.55, -0.83, 10.5, 6.3, 5.0);
@@ -654,23 +773,65 @@ export class Level {
     // south range
     this._block({ x0: KERB, x1: 34, z0: 36, z1: 41.5, floors: 3, mat: this.M.plasterA, open: ['-x', '-z', '+z'], balcony: true, doors: [{ face: '-x', c: 38.8, w: 1.5 }] });
     // street range, split by the courtyard gate
-    this._block({ x0: KERB, x1: 15.5, z0: 41.5, z1: 46.0, floors: 3, mat: this.M.brick, open: ['-x'], balcony: true });
+    this._block({ x0: KERB, x1: 15.5, z0: 41.5, z1: 46.0, floors: 3, mat: this.M.brick, open: ['-x', '+x'], balcony: true });
     this._gateArch(KERB, 15.5, 46.0, 51.0, 5.4, 3.0);
-    this._block({ x0: KERB, x1: 15.5, z0: 51.0, z1: 62, floors: 3, mat: this.M.plasterB, open: ['-x'], balcony: true, doors: [{ face: '-x', c: 57.0, w: 1.5 }] });
+    this._block({ x0: KERB, x1: 15.5, z0: 51.0, z1: 62, floors: 4, mat: this.M.plasterB, open: ['-x', '+x'], balcony: true,
+      doors: [{ face: '-x', c: 57.0, w: 1.5 }, { face: '+x', c: 53.5, w: 1.5 }] });
     // east range
-    this._block({ x0: 31.5, x1: 36, z0: 41.5, z1: 62, floors: 3, mat: this.M.plasterA, open: ['-x'], cover: false });
+    this._block({ x0: 31.5, x1: 36, z0: 41.5, z1: 62, floors: 2, mat: this.M.plasterA, open: ['-x'], balcony: true, cover: false });
     // north range with the external stair
     this._block({ x0: KERB, x1: 36, z0: 62, z1: 66, floors: 3, mat: this.M.brick, open: ['-z', '+z'], cover: false });
 
     this._courtyard(cy);
 
     // --- EC: tall far-side block beyond the gatehouse.
-    this._block({ x0: 12, x1: 34, z0: 72, z1: 92, floors: 4, mat: this.M.plasterB, open: ['-x', '-z'], balcony: true, doors: [{ face: '-x', c: 78, w: 1.5 }] });
+    this._block({ x0: 12, x1: 34, z0: 72, z1: 92, floors: 5, mat: this.M.plasterB, open: ['-x', '-z'], balcony: true, doors: [{ face: '-x', c: 78, w: 1.5 }] });
     this._block({ x0: 12, x1: 32, z0: 96, z1: 112, floors: 3, mat: this.M.plasterA, open: ['-x', '-z'] });
 
     // --- EE: southern east frontage.
     this._block({ x0: KERB, x1: 30, z0: -26, z1: -8, floors: 3, mat: this.M.plasterA, open: ['-x', '+z'], balcony: true, doors: [{ face: '-x', c: -18, w: 1.5 }] });
     this._block({ x0: KERB, x1: 32, z0: -4, z1: 12, floors: 2, mat: this.M.brick, open: ['-x', '-z', '+z'], balcony: true, doors: [{ face: '-x', c: 2.5, w: 1.6 }] });
+  }
+
+  /**
+   * Dressing for the one roof the level actively routes the player onto. The
+   * climb has to pay off: a firing position looking straight back down the
+   * street, shade, ammunition, and a hole to drop through.
+   */
+  _eaRoof(y) {
+    const b = this.b, R = () => this.rng();
+    // Sandbag hide on the street parapet, facing west down the road.
+    P.sandbags(b, this.M.bag, 12.0, y, 22.0, Math.PI / 2, 3, 7);
+    P.sandbags(b, this.M.bag, 12.6, y, 27.4, Math.PI / 2, 2, 4);
+    this._cover(13.2, 22.0);
+    // Tarp shade on scaffold poles over the hide.
+    for (const [px, pz] of [[12.2, 18.8], [16.4, 18.8], [12.2, 25.4], [16.4, 25.4]]) {
+      P.cylinder(b, this.M.steelProp, px, y, pz, 0.05, 2.2, null, { collide: false });
+    }
+    b.shape(this.M.tarpB, new THREE.BoxGeometry(4.6, 0.05, 7.0),
+      { x: 14.3, y: y + 2.22, z: 22.1 }, { x: 0.09, y: 0, z: 0.05 }, { x: 1, y: 1, z: 1 },
+      { collide: false, uvScale: [2.3, 3.5] });
+    // Kit: ammo crates, drums, a folded stretcher of pallets, spent casings.
+    P.crateStack(b, this.M.woodProp, 15.4, y, 19.6, 0.4, R);
+    P.crateStack(b, this.M.woodProp, 22.6, y, 27.0, 1.3, R);
+    P.oilDrum(b, this.M.steelProp, 24.4, y, 18.6, 0.3, false);
+    P.oilDrum(b, this.M.steelProp, 25.2, y, 19.4, 0.9, true);
+    P.pallet(b, this.M.woodProp, 23.4, y + 0.01, 22.4, 0.6);
+    for (let i = 0; i < 40; i++) {
+      P.cylinder(b, this.M.gun, 11.6 + R() * 3.4, y + 0.03, 19.6 + R() * 5.6, 0.011, 0.05,
+        { x: Math.PI / 2, y: R() * 3, z: 0 }, { collide: false });
+    }
+    // Guard rail of scaffold tube round the roof hole, and a ladder into it.
+    for (const [px, pz] of [[17.3, 20.3], [21.7, 20.3], [17.3, 24.2], [21.7, 24.2]]) {
+      b.box(this.M.steelProp, px, y, pz, 0.07, 1.0, 0.07, 0, { collide: false });
+    }
+    for (let i = 0; i < 9; i++) b.box(this.M.steelProp, 21.4, y - 0.4 - i * 0.32, 22.2, 0.5, 0.05, 0.05, 0, { collide: false });
+    for (const px of [21.16, 21.64]) b.box(this.M.steelProp, px, y - 3.2, 22.2, 0.05, 3.3, 0.05, 0, { collide: false });
+    // Aerial mast + dish: the silhouette element that says "this roof matters".
+    P.cylinder(b, this.M.steelProp, 26.0, y, 25.6, 0.06, 5.2, null, { collide: false });
+    for (let i = 1; i < 4; i++) b.box(this.M.steelProp, 26.0, y + i * 1.3, 25.6, 1.0 - i * 0.2, 0.05, 0.05, i * 0.4, { collide: false });
+    P.satelliteDish(b, this.M.concF, 24.8, y, 16.9, 2.4, 0.7);
+    P.waterTank(b, this.M.steelProp, 26.4, y, 20.4, 0.62, 1.2, true);
   }
 
   /** Removes a building corner and leaves cantilevered slabs and rebar. */
@@ -726,16 +887,16 @@ export class Level {
 
     // Stall row along the west side, facing into the yard.
     for (let i = 0; i < 4; i++) {
-      P.stall(b, this.M.wood, this.M.tarp, this.M.wood, c.x0 + 1.6, 0, c.z0 + 2.6 + i * 3.4, -Math.PI / 2, 2.8, 1.9, R);
+      P.stall(b, this.M.woodProp, this.M.tarp, this.M.woodProp, c.x0 + 1.6, 0, c.z0 + 2.6 + i * 3.4, -Math.PI / 2, 2.8, 1.9, R);
       this._cover(c.x0 + 2.6, c.z0 + 2.6 + i * 3.4);
     }
     // Continuous awning along the east side.
     for (let i = 0; i < 5; i++) {
-      P.awning(b, this.M.tarp, this.M.rust, c.x1 - 1.0, 2.9, c.z0 + 2.2 + i * 3.6, 3.4, 2.0, -Math.PI / 2);
+      P.awning(b, this.M.tarp, this.M.steelProp, c.x1 - 1.0, 2.9, c.z0 + 2.2 + i * 3.6, 3.4, 2.0, -Math.PI / 2);
     }
     // Laundry and bunting overhead — the thing that makes a courtyard read.
     P.laundry(b, this.M.wire, this.M.cloth, c.x0 + 0.4, 7.0, c.z0 + 4, c.x1 - 0.4, 6.4, c.z0 + 7, R);
-    P.laundry(b, this.M.wire, this.M.cloth, c.x0 + 0.4, 6.2, c.z0 + 12, c.x1 - 0.4, 6.9, c.z0 + 10, R);
+    P.laundry(b, this.M.wire, this.M.cloth2, c.x0 + 0.4, 6.2, c.z0 + 12, c.x1 - 0.4, 6.9, c.z0 + 10, R);
     P.wire(b, this.M.wire, c.x0, 9.4, c.z0 + 16, c.x1, 9.0, c.z0 + 15, 1.0, 6);
 
     // Well / cistern head at the centre — a landmark inside the yard.
@@ -773,9 +934,9 @@ export class Level {
     for (let i = 0; i < 9; i++) {
       const x = c.x0 + 1 + R() * (c.x1 - c.x0 - 2), z = c.z0 + 1 + R() * (c.z1 - c.z0 - 2);
       const r = R();
-      if (r < 0.35) P.crateStack(b, this.M.wood, x, 0, z, R() * 3, R);
-      else if (r < 0.6) P.oilDrum(b, this.M.rust, x, 0, z, R() * 3, R() < 0.3);
-      else if (r < 0.8) P.pallet(b, this.M.wood, x, 0.02, z, R() * 3);
+      if (r < 0.35) P.crateStack(b, this.M.woodProp, x, 0, z, R() * 3, R);
+      else if (r < 0.6) P.oilDrum(b, this.M.steelProp, x, 0, z, R() * 3, R() < 0.3);
+      else if (r < 0.8) P.pallet(b, this.M.woodProp, x, 0.02, z, R() * 3);
       else P.tyre(b, this.M.dark, x, 0.02, z, R() * 3, true);
     }
   }
@@ -787,17 +948,34 @@ export class Level {
   _gatehouse() {
     const b = this.b, R = () => this.rng();
     const z0 = 64, z1 = 70.5;
-    const mat = this.M.brick;
+    // Plaster, not brick. Brick is kept for the pier plinths only — the arch is
+    // the biggest surface in the hero frame and it has to sit inside the
+    // palette rather than shout out of it.
+    const mat = this.M.plasterB;
     const springing = 4.4;
-    const r = 6.2;                 // arch radius -> 12.4 m span, crown at 10.6
+    // 14.4 m span. Sized from the shot, not from taste: at the spawn (z = 42)
+    // the opening has to subtend enough angle to show the minaret standing
+    // 38 m further on at x = -11.5, which a 12.4 m span did not.
+    const r = 7.2;
     const top = 15.4;
 
     // Piers.
     b.aabb(mat, -16, 0, z0, -r, springing, z1);
     b.aabb(mat, r, 0, z0, 16, springing, z1);
-    // Plinth course.
-    b.aabb(this.M.concF, -16.2, 0, z0 - 0.2, -r + 0.2, 0.75, z1 + 0.2, { collide: false });
-    b.aabb(this.M.concF, r - 0.2, 0, z0 - 0.2, 16.2, 0.75, z1 + 0.2, { collide: false });
+    // Brick plinth + a banded course at head height: two horizontal shadow
+    // lines that stop each pier reading as one flat panel.
+    b.aabb(this.M.brick, -16.2, 0, z0 - 0.2, -r + 0.2, 1.15, z1 + 0.2, { collide: false });
+    b.aabb(this.M.brick, r - 0.2, 0, z0 - 0.2, 16.2, 1.15, z1 + 0.2, { collide: false });
+    b.aabb(this.M.concF, -16.25, 1.15, z0 - 0.25, -r + 0.25, 1.3, z1 + 0.25, { collide: false });
+    b.aabb(this.M.concF, r - 0.25, 1.15, z0 - 0.25, 16.25, 1.3, z1 + 0.25, { collide: false });
+    // Deep niches in the pier faces — the piers are 8.8 m wide and need relief.
+    for (const sx of [-1, 1]) {
+      for (const o2 of [2.4, 5.4]) {
+        const nx = sx * (r + o2);
+        b.box(this.M.brick, nx, 1.4, z0 - 0.12, 1.3, 2.6, 0.3, 0, { collide: false });
+        b.box(this.M.concF, nx, 4.0, z0 - 0.2, 1.7, 0.22, 0.42, 0, { collide: false });
+      }
+    }
 
     // Barrel vault, cut as slabs so the intrados is a true arc.
     const steps = 26;
@@ -807,7 +985,13 @@ export class Level {
       const sh = r / steps + 0.02;
       b.aabb(mat, -16, y, z0, -hw, y + sh, z1);
       b.aabb(mat, hw, y, z0, 16, y + sh, z1);
+      // Projecting archivolt on the south face: the arch needs an edge, or the
+      // opening reads as a hole punched in a slab.
+      b.aabb(this.M.brick, -hw - 0.65, y, z0 - 0.22, -hw, y + sh, z0, { collide: false });
+      b.aabb(this.M.brick, hw, y, z0 - 0.22, hw + 0.65, y + sh, z0, { collide: false });
     }
+    b.aabb(this.M.brick, -r - 0.65, springing - 0.6, z0 - 0.22, -r, springing, z0, { collide: false });
+    b.aabb(this.M.brick, r, springing - 0.6, z0 - 0.22, r + 0.65, springing, z0, { collide: false });
     // Mass above the crown, with a band of windows and a big square opening
     // that keeps the silhouette from being one solid slab.
     const crown = springing + r;
@@ -828,14 +1012,22 @@ export class Level {
     b.aabb(this.M.concF, -16, crown, z0 + 0.6, 16, crown + 0.3, z1 - 0.6);
     for (const c of [-9.5, -4.5, 0, 4.5, 9.5]) this._reveal('x', c, z0 + 0.3, crown + 1.1, c === 0 ? 3.0 : 1.4, c === 0 ? 2.6 : 1.9, 0.6, -1);
 
-    // Roof, parapet, and a crenellated coping — the top edge of the frame.
+    // Roof and parapet. The first pass had merlons, which read as a castle
+    // keep; a solid parapet pierced by small vents is the right vernacular and
+    // gives a cleaner horizontal cap to the frame.
     b.aabb(this.M.concF, -16.4, top, z0 - 0.4, 16.4, top + 0.35, z1 + 0.4);
-    for (let x = -16.4; x < 16.4; x += 1.3) {
-      b.box(mat, x + 0.45, top + 0.35, z0 - 0.15, 0.9, 1.0, 0.5);
-      b.box(mat, x + 0.45, top + 0.35, z1 + 0.15, 0.9, 1.0, 0.5);
+    for (const zz of [z0 - 0.15, z1 + 0.15]) {
+      this._wall(mat, 'x', -16.4, 12.4, zz, top + 0.35, 1.15, 0.5,
+        Array.from({ length: 10 }, (_, i) => ({ c: -13.5 + i * 2.7, w: 0.5, y: top + 0.85, h: 0.5 })));
     }
-    b.aabb(mat, -16.4, top + 0.35, z0 + 0.35, -15.9, top + 1.35, z1 - 0.35);
-    b.aabb(mat, 15.9, top + 0.35, z0 + 0.35, 16.4, top + 1.35, z1 - 0.35);
+    b.aabb(mat, -16.4, top + 0.35, z0 + 0.35, -15.9, top + 1.5, z1 - 0.35);
+    b.aabb(this.M.concF, -16.55, top + 1.5, z0 - 0.55, 12.6, top + 1.68, z1 + 0.55, { collide: false });
+    // Damage: the east end of the coping is gone and the parapet under it is
+    // broken back to a ragged stub, so the silhouette is not perfectly level.
+    for (let i = 0; i < 5; i++) {
+      b.box(this.M.concF, 12.6 + i * 0.9, top + 1.5, z0 - 0.15, 0.85, 0.16 + R() * 0.5, 0.6, R() * 0.2, { collide: false });
+    }
+    P.rebar(b, this.M.steelProp, 14.6, top + 1.6, z0 - 0.1, 7, 1.8, 0.7, R);
     this._roofClutter(-15, 15, z0 + 1, z1 - 1, top + 0.35, true);
 
     // Corbelled string course under the arch springing, plus lamp brackets.
@@ -849,8 +1041,10 @@ export class Level {
 
     // Hanging sign over the passage — occludes the vista slightly, which is
     // exactly what stops the arch reading as an empty rectangle.
-    b.box(this.M.rust, 0, 3.9, z0 - 0.5, 0.08, 0.08, 1.0, 0, { collide: false });
-    b.box(this.M.rust, -2.6, 3.2, z0 - 0.9, 5.2, 0.9, 0.08, 0.04, { collide: false });
+    b.box(this.M.steelProp, -3.4, 4.05, z0 - 0.55, 0.09, 0.09, 1.1, 0, { collide: false });
+    b.box(this.M.steelProp, -3.4, 3.98, z0 - 1.05, 3.0, 0.09, 0.09, 0, { collide: false });
+    for (const dx of [-1.3, 1.3]) b.box(this.M.steelProp, -3.4 + dx, 3.5, z0 - 1.05, 0.05, 0.5, 0.05, 0, { collide: false });
+    b.box(this.M.steelProp, -3.4, 2.55, z0 - 1.05, 3.0, 0.95, 0.06, 0.06, { collide: false });
 
     // Blast damage: the west pier has taken a hit.
     b.box(this.M.dark, -r - 1.6, 0, z0 - 0.15, 2.6, 3.2, 0.35, 0.05, { collide: false });
@@ -872,37 +1066,69 @@ export class Level {
   _farQuarter() {
     const b = this.b, R = () => this.rng();
 
-    this._block({ x0: -32, x1: -KERB, z0: 74, z1: 86, floors: 4, mat: this.M.plasterB, open: ['+x', '-z', '+z'], balcony: true, doors: [{ face: '+x', c: 80, w: 1.5 }] });
-    this._block({ x0: -32, x1: -16, z0: 88, z1: 104, floors: 3, mat: this.M.plasterA, open: ['+x', '-z'] });
-    this._block({ x0: -32, x1: -KERB, z0: 108, z1: 118, floors: 3, mat: this.M.brick, open: ['-z'] });
+    // The west side of the far quarter is set back behind the mosque forecourt
+    // so the minaret has air around it instead of being lost against a facade.
+    this._block({ x0: -34, x1: -18, z0: 88, z1: 104, floors: 3, mat: this.M.plasterA, open: ['+x', '-z'], balcony: true });
+    this._block({ x0: -34, x1: -KERB, z0: 108, z1: 118, floors: 4, mat: this.M.brick, open: ['-z'] });
 
     // --- The minaret. Offset just far enough west that a slice of it lands
     //     inside the arch opening from the spawn, which is the whole point.
-    const mx = -13.0, mz = 94.0, H = 23.5;
+    // Placement is pure sightline maths. From the spawn at z = 42 the arch
+    // opening (z = 64.5, half-width 7.2) subtends +/-18 deg, so a landmark at
+    // 38 m has to sit inside +/-12.3 m of the centreline to show through it.
+    // x = -11.5 puts a slice of the shaft in the opening; 27 m of height puts
+    // the gallery and cap above the gatehouse roofline at 17 m. One landmark
+    // read two ways in the same frame.
+    const mx = -11.5, mz = 80.0, H = 27.0;
     const mat = this.M.plasterB;
-    b.box(this.M.concF, mx, 0, mz, 6.4, 1.0, 6.4);
-    b.box(mat, mx, 1.0, mz, 5.2, 9.0, 5.2);
-    b.box(this.M.concF, mx, 10.0, mz, 5.8, 0.4, 5.8, 0, { collide: false });
-    b.box(mat, mx, 10.4, mz, 4.2, 5.0, 4.2, Math.PI / 8);
-    b.box(this.M.concF, mx, 15.4, mz, 5.4, 0.35, 5.4, Math.PI / 8, { collide: false });
-    // gallery railing
-    for (let i = 0; i < 20; i++) {
-      const a = (i / 20) * Math.PI * 2;
-      b.box(this.M.rust, mx + Math.cos(a) * 2.5, 15.75, mz + Math.sin(a) * 2.5, 0.08, 0.9, 0.08, a, { collide: false });
+    const gal = 17.6;                                   // muezzin's gallery
+    b.box(this.M.concF, mx, 0, mz, 6.8, 0.9, 6.8);
+    b.box(this.M.brick, mx, 0.9, mz, 5.6, 2.2, 5.6);
+    b.box(this.M.concF, mx, 3.1, mz, 6.0, 0.3, 6.0, 0, { collide: false });
+    b.box(mat, mx, 3.4, mz, 5.0, 8.0, 5.0);
+    b.box(this.M.concF, mx, 11.4, mz, 5.6, 0.35, 5.6, 0, { collide: false });
+    b.box(mat, mx, 11.75, mz, 3.9, gal - 12.1, 3.9, Math.PI / 8);
+    // Corbelled gallery: three stepped courses, then the balcony and its rail.
+    for (let i = 0; i < 3; i++) {
+      b.box(this.M.concF, mx, gal - 0.75 + i * 0.22, mz, 4.2 + i * 0.7, 0.22, 4.2 + i * 0.7, Math.PI / 8, { collide: false });
     }
-    b.box(mat, mx, 15.75, mz, 3.0, H - 16.6, 3.0, Math.PI / 8);
-    // window slots on the shaft
+    b.box(this.M.concF, mx, gal - 0.09, mz, 5.8, 0.28, 5.8, Math.PI / 8, { collide: false });
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2;
+      b.box(this.M.steelProp, mx + Math.cos(a) * 2.7, gal + 0.19, mz + Math.sin(a) * 2.7, 0.08, 0.95, 0.08, a, { collide: false });
+    }
+    b.box(mat, mx, gal + 0.19, mz, 3.0, H - gal - 1.6, 3.0, Math.PI / 8);
+    // Tall arched slots up the shaft — the vertical rhythm that says minaret.
+    for (let i = 0; i < 5; i++) {
+      const y = 4.4 + i * 2.4;
+      for (const [ox, oz, w2, d2] of [[0, -2.52, 0.66, 0.2], [0, 2.52, 0.66, 0.2], [-2.52, 0, 0.2, 0.66], [2.52, 0, 0.2, 0.66]]) {
+        b.box(this.M.dark, mx + ox, y, mz + oz, w2, 1.7, d2, 0, { collide: false });
+        b.box(this.M.concF, mx + ox * 1.04, y + 1.7, mz + oz * 1.04, w2 + 0.3, 0.14, d2 + 0.3, 0, { collide: false });
+      }
+    }
     for (let i = 0; i < 4; i++) {
-      const y = 3.0 + i * 2.0;
-      b.box(this.M.dark, mx, y, mz - 2.62, 0.7, 1.5, 0.14, 0, { collide: false });
-      b.box(this.M.dark, mx - 2.62, y, mz, 0.14, 1.5, 0.7, 0, { collide: false });
+      const a = Math.PI / 8 + i * Math.PI / 2;
+      b.box(this.M.dark, mx + Math.cos(a) * 1.52, gal + 1.4, mz + Math.sin(a) * 1.52, 0.5, 1.3, 0.5, a, { collide: false });
     }
-    // cap
-    b.box(this.M.concF, mx, H - 0.85, mz, 3.6, 0.3, 3.6, Math.PI / 8, { collide: false });
-    b.shape(this.M.concF, new THREE.ConeGeometry(2.0, 2.6, 8),
-      { x: mx, y: H + 0.75, z: mz }, { x: 0, y: Math.PI / 8, z: 0 }, { x: 1, y: 1, z: 1 },
-      { collide: false, uvScale: [3, 2] });
-    P.cylinder(b, this.M.rust, mx, H + 2.0, mz, 0.06, 1.4, null, { collide: false });
+    // Cap: cornice, dome drum, dome, finial.
+    b.box(this.M.concF, mx, H - 1.55, mz, 3.7, 0.3, 3.7, Math.PI / 8, { collide: false });
+    b.shape(this.M.plasterB, new THREE.SphereGeometry(1.55, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+      { x: mx, y: H - 1.25, z: mz }, { x: 0, y: 0, z: 0 }, { x: 1, y: 1.15, z: 1 },
+      { collide: false, uvScale: [4, 2] });
+    P.cylinder(b, this.M.steelProp, mx, H + 0.55, mz, 0.07, 1.6, null, { collide: false });
+    b.shape(this.M.steelProp, new THREE.TorusGeometry(0.38, 0.06, 5, 10),
+      { x: mx, y: H + 1.8, z: mz }, { x: 0, y: 0, z: 0 }, { x: 1, y: 1, z: 1 }, { collide: false, uvScale: [2, 0.4] });
+
+    // Mosque body at the tower's foot, with its own arcaded forecourt wall. The
+    // minaret needs something to belong to or it reads as a chimney.
+    this._block({ x0: -34, x1: -14.6, z0: 74, z1: 86, floors: 2, floorH: 4.2, mat: this.M.plasterB,
+      open: ['+x', '-z'], doors: [{ face: '+x', c: 80, w: 2.2, h: 3.2 }] });
+    for (let i = 0; i < 4; i++) {
+      const zz = 75.6 + i * 3.0;
+      b.aabb(this.M.plasterB, -14.4, 0, zz - 1.1, -13.4, 3.0, zz + 1.1);
+      b.aabb(this.M.concF, -14.5, 3.0, zz - 1.3, -13.3, 3.25, zz + 1.3, { collide: false });
+    }
+    b.aabb(this.M.plasterB, -14.5, 3.25, 74, -13.3, 5.4, 86);
 
     // A vehicle checkpoint and craters on the far stretch so the vista through
     // the arch has depth cues rather than empty asphalt.
@@ -924,30 +1150,52 @@ export class Level {
     const b = this.b, R = () => this.rng();
 
     // Square on the west side of the street, z -2..18, bounded west by MA.
-    this._block({ x0: -38, x1: -24, z0: -6, z1: 22, floors: 2, mat: this.M.plasterA, open: ['+x', '+z'], balcony: true, doors: [{ face: '+x', c: 4.0, w: 1.6 }, { face: '+x', c: 14.0, w: 1.4 }] });
+    this._block({ x0: -38, x1: -24, z0: -6, z1: 22, floors: 3, mat: this.M.plasterA, open: ['+x', '+z'], balcony: true, doors: [{ face: '+x', c: 4.0, w: 1.6 }, { face: '+x', c: 14.0, w: 1.4 }] });
     // North side of the square is WA's flank; south side:
     this._block({ x0: -32, x1: -KERB, z0: -9, z1: -2, floors: 3, mat: this.M.brick, open: ['+z', '+x'], balcony: true });
     // Alley (z -14 .. -9) then the southern block.
-    this._block({ x0: -32, x1: -KERB, z0: -26, z1: -14, floors: 3, mat: this.M.plasterB, open: ['+z', '+x', '-z'], balcony: true, doors: [{ face: '+z', c: -19, w: 1.5 }] });
+    this._block({ x0: -32, x1: -KERB, z0: -26, z1: -14, floors: 4, mat: this.M.plasterB, open: ['+z', '+x', '-z'], balcony: true, doors: [{ face: '+z', c: -19, w: 1.5 }] });
 
     // --- Square dressing. This is the pose "wall" and "alley" backdrop.
     b.plane(this.M.gravel, -17.5, 0.04, 8, 12.5, 18);
     for (let i = 0; i < 5; i++) {
-      P.stall(b, this.M.wood, this.M.tarp, this.M.wood, -22.0, 0, 0.5 + i * 3.6, Math.PI / 2, 2.9, 2.0, R);
+      P.stall(b, this.M.woodProp, this.M.tarp, this.M.woodProp, -22.0, 0, 0.5 + i * 3.6, Math.PI / 2, 2.9, 2.0, R);
       this._cover(-20.6, 0.5 + i * 3.6);
     }
-    for (let i = 0; i < 4; i++) {
-      P.awning(b, this.M.tarp, this.M.rust, -12.6, 3.0, 2.5 + i * 4.0, 3.6, 2.2, Math.PI / 2);
+    // --- The square's east side used to be a hole where the street was, with
+    //     a row of awnings hanging off nothing. It is now an arcade: a run of
+    //     piers carrying a first floor, which separates square from street
+    //     while letting you walk and see through it. It also caps the top of
+    //     the frame from inside the square and throws bars of shadow across it.
+    this._arcade(-11.6, -1.0, 19.0, 3.5, 3.05, 'z');
+    for (let i = 0; i < 5; i++) {
+      P.awning(b, this.M.tarp, this.M.steelProp, -13.4, 2.9, 0.6 + i * 3.6, 3.2, 2.0, Math.PI / 2);
     }
-    P.laundry(b, this.M.wire, this.M.cloth, -23.4, 6.6, 4.0, -11.4, 6.0, 5.2, R);
-    P.laundry(b, this.M.wire, this.M.cloth, -23.4, 5.6, 11.5, -11.4, 6.4, 10.2, R);
-    P.wire(b, this.M.wire, -23.4, 8.2, 15.5, -11.4, 8.0, 16.4, 0.9, 6);
+    // The "wall" review pose stands 3.7 m off MA's east face, so that one strip
+    // of facade has to survive a close read: threshold step, drain, meter box,
+    // spalled render showing the block behind, a bench, a stack of tyres.
+    this._closeFacade(-24.21, 0.0, 20.0, 'z', -1);
+    P.laundry(b, this.M.wire, this.M.cloth, -23.4, 6.6, 4.0, -12.2, 6.0, 5.2, R);
+    P.laundry(b, this.M.wire, this.M.cloth2, -23.4, 5.6, 11.5, -12.2, 6.4, 10.2, R);
+    P.laundry(b, this.M.wire, this.M.cloth, -23.4, 8.0, 15.5, -12.2, 7.6, 16.4, R);
 
-    // Fountain/basin at the square's centre gives the eye a focal point.
-    b.box(this.M.concF, -17.6, 0, 12.2, 4.4, 0.55, 4.4, 0.2);
-    b.box(this.M.dark, -17.6, 0.55, 12.2, 3.6, 0.05, 3.6, 0.2, { collide: false });
-    P.cylinder(b, this.M.concF, -17.6, 0.55, 12.2, 0.5, 1.5, null, { hi: true });
-    this._cover(-17.6, 14.6);
+    // Fountain: octagonal basin, stepped rim, dry. A focal point the eye can
+    // land on and a piece of human-scale reference in the middle of the square.
+    const fx = -17.6, fz = 12.2;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+      b.box(this.M.concF, fx + Math.cos(a) * 2.05, 0, fz + Math.sin(a) * 2.05, 1.9, 0.62, 0.55, -a);
+      b.box(this.M.tile, fx + Math.cos(a) * 2.05, 0.62, fz + Math.sin(a) * 2.05, 1.95, 0.1, 0.62, -a, { collide: false });
+    }
+    b.plane(this.M.tile, fx, 0.16, fz, 3.6, 3.6, 0.4, { collide: false });
+    P.cylinder(b, this.M.concF, fx, 0.16, fz, 0.62, 0.5, null, { hi: true });
+    P.cylinder(b, this.M.concF, fx, 0.66, fz, 0.34, 1.1, null, { hi: true });
+    P.cylinder(b, this.M.steelProp, fx, 1.76, fz, 0.16, 0.42, null, { hi: true, collide: false });
+    for (let i = 0; i < 24; i++) {
+      const a = R() * Math.PI * 2, rr = 0.5 + R() * 1.4;
+      b.box(this.M.concF, fx + Math.cos(a) * rr, 0.16, fz + Math.sin(a) * rr, 0.2 + R() * 0.2, 0.1, 0.18 + R() * 0.2, R() * 3, { collide: false });
+    }
+    this._cover(fx, fz + 2.6);
 
     // Sandbagged position at the square's mouth, facing north up the street.
     P.sandbags(b, this.M.bag, -12.0, PAVE_Y, 19.5, 0, 3, 8);
@@ -955,14 +1203,14 @@ export class Level {
     this._cover(-12.0, 18.0);
 
     // --- Alley at z -14..-9: containers, drums, fire escape, deep shade.
-    for (const [x, z, rot, col] of [[-13.5, -11.5, 0.02, 0], [-21.0, -11.4, 0, 1], [-28.5, -11.6, 0.05, 0]]) {
-      const m = col ? this.M.cBlue : this.M.cRed;
-      this._container(m, x, 0, z, rot);
-      this._cover(x, z + 2.0);
+    // Containers hug the south wall, staggered, leaving a 3 m route along the
+    // north side: cover to move between, not a plug.
+    for (const [x, z, rot, col] of [[-14.2, -12.8, Math.PI / 2 + 0.03, 0], [-22.0, -12.9, Math.PI / 2, 1], [-29.4, -12.7, Math.PI / 2 + 0.05, 0]]) {
+      this._container(col ? this.M.cBlue : this.M.cRed, x, 0, z, rot);
+      this._cover(x, z + 2.4);
     }
-    this._container(this.M.cBlue, -25.0, 0, -11.5, 0.03);
-    this._container(this.M.cRed, -25.0, 2.62, -11.5, -0.02);
-    for (let i = 0; i < 6; i++) P.oilDrum(b, this.M.rust, -30 + R() * 18, 0, -13.4 + R() * 1.2, R() * 3, R() < 0.25);
+    this._container(this.M.cBlue, -22.0, 2.62, -12.9, Math.PI / 2 - 0.02);
+    for (let i = 0; i < 6; i++) P.oilDrum(b, this.M.steelProp, -30 + R() * 18, 0, -13.4 + R() * 1.2, R() * 3, R() < 0.25);
     // Fire escape on the south alley wall — climbable to a 4.2 m platform.
     this._fireEscape(-16.5, -14.0, 4.2);
 
@@ -986,6 +1234,51 @@ export class Level {
       b.box(this.M.rust, x + c * o - s * (L / 2 + 0.03), y + 0.2, z + s * o + c * (L / 2 + 0.03), 0.1, H - 0.5, 0.1, rotY, { collide: false });
     }
     b.box(this.M.rust, x - s * (L / 2 + 0.04), y + 1.1, z + c * (L / 2 + 0.04), 0.9, 0.12, 0.08, rotY, { collide: false });
+  }
+
+  /**
+   * Close-range facade detail for the stretch of wall a review pose stands in
+   * front of. Everything here is under 0.4 m and exists so the eye has
+   * something to land on at 3-4 m: at that range a clean plaster panel is the
+   * most obviously untouched surface in the level.
+   *
+   * @param p     the facade plane
+   * @param a0,a1 extent along `axis`
+   * @param out   which way the facade faces (-1 = towards -x / -z)
+   */
+  _closeFacade(p, a0, a1, axis, out) {
+    const b = this.b, R = () => this.rng();
+    const at = (c, dp, y, w, h, d, mat, opts) => {
+      if (axis === 'z') b.box(mat, p + out * dp, y, c, d, h, w, 0, opts);
+      else b.box(mat, c, y, p + out * dp, w, h, d, 0, opts);
+    };
+    const N = { collide: false };
+    for (let i = 0; a0 + i * 4.4 < a1; i++) {
+      const c = a0 + 1.2 + i * 4.4;
+      // Spalled render: a patch of the blockwork behind showing through.
+      at(c, 0.02, 0.4 + R() * 2.2, 0.9 + R() * 1.3, 0.7 + R() * 1.1, 0.06, this.M.brick, N);
+      // Rainwater goods.
+      P.cylinder(b, this.M.steelProp, axis === 'z' ? p + out * 0.11 : c, 0, axis === 'z' ? c : p + out * 0.11, 0.055, 5.4, null, N);
+      at(c + 0.02, 0.16, 0, 0.28, 0.3, 0.3, this.M.steelProp, N);       // shoe
+      // Splash stain and a drift of grit at the base.
+      at(c, 0.05, 0, 0.55, 0.9, 0.1, this.M.scorch, N);
+      at(c + 1.9, 0.14, 1.35, 0.4, 0.55, 0.24, this.M.steelProp, N);    // meter box
+      if (i % 2 === 0) {
+        at(c + 2.6, 0.5, 0, 1.6, 0.44, 0.55, this.M.concF);             // bench
+        at(c + 2.6, 0.5, 0.44, 1.7, 0.08, 0.62, this.M.woodProp, N);
+      } else {
+        P.tyre(b, this.M.dark, axis === 'z' ? p + out * 0.55 : c + 2.4, 0.01, axis === 'z' ? c + 2.4 : p + out * 0.55, 0.4, false);
+        P.tyre(b, this.M.dark, axis === 'z' ? p + out * 0.58 : c + 2.5, 0.23, axis === 'z' ? c + 2.5 : p + out * 0.58, 1.1, false);
+      }
+      // Cable run and a conduit box, stapled across the render.
+      at(c + 1.0, 0.08, 2.6, 3.6, 0.05, 0.05, this.M.wire, N);
+      at(c + 1.0, 0.08, 2.62, 0.05, 0.5, 0.05, this.M.wire, N);
+    }
+    // Kerb-level rubbish and grit drift the whole length.
+    for (let i = 0; i < 60; i++) {
+      const c = a0 + R() * (a1 - a0), dp = 0.2 + R() * 0.9, sz = 0.08 + R() * 0.26;
+      at(c, dp, 0, sz * 1.6, sz * 0.6, sz * 1.4, this.M.concF, N);
+    }
   }
 
   /** Zig-zag steel fire escape bolted to a wall. Reachable, mantle-friendly. */
@@ -1036,12 +1329,20 @@ export class Level {
       P.streetLamp(b, this.M.rust, s * 8.9, PAVE_Y, z, -s, 6.4);
     }
 
-    // Bus wreck skewed across the near third of the street: it breaks the
-    // sightline to the arch without hiding it, and forces a route choice.
-    P.busWreck(b, this.M.cBlue, this.M.dark, this.M.rust, this.M.glass, -1.6, 0, 51.5, 1.42);
-    this._cover(-1.6, 48.6); this._cover(-1.6, 54.4);
-    // scorch under it
-    b.plane(this.M.scorch, -1.6, 0.055, 51.5, 12, 6, 1.42, { collide: false });
+    // Bus wreck. First pass had it square across the middle of the road at the
+    // exact height that masked the arch springing; it is now pulled to the west
+    // kerb and swung round so it leads the eye up the street rather than
+    // fencing it off. Body is a dusty cream, not container blue.
+    P.busWreck(b, this.M.busBody, this.M.dark, this.M.rust, this.M.glass, -4.1, 0, 47.5, 0.42);
+    this._cover(-2.4, 44.0); this._cover(-2.4, 51.0);
+    b.plane(this.M.scorch, -4.1, 0.055, 47.5, 7, 13, 0.42, { collide: false });
+    // Debris field thrown off the bus, and one wheel well away from it.
+    for (let i = 0; i < 30; i++) {
+      const a = R() * Math.PI * 2, rr = 2 + R() * 6;
+      b.box(this.M.dark, -4.1 + Math.cos(a) * rr, 0.03, 47.5 + Math.sin(a) * rr,
+        0.16 + R() * 0.4, 0.06 + R() * 0.12, 0.16 + R() * 0.4, R() * 3, { collide: false });
+    }
+    P.tyre(b, this.M.dark, 1.4, 0.02, 43.0, 1.1, true);
 
     // Crater in the near road — the "ground" pose looks straight into it.
     this._crater(2.6, 36.5, 3.4, 0.7);
@@ -1057,10 +1358,13 @@ export class Level {
     P.hesco(b, this.M.bag, this.M.rust, 8.2, PAVE_Y, 30.0, 5.0, 0);
     P.hesco(b, this.M.bag, this.M.rust, -8.4, PAVE_Y, 12.0, 4.0, 0);
 
-    // Containers used as a chicane just south of the gatehouse.
-    this._container(this.M.cRed, 4.4, 0, 60.5, Math.PI / 2 + 0.06);
-    this._container(this.M.cBlue, -4.8, 0, 63.0, Math.PI / 2 - 0.04);
-    this._cover(4.4, 58.6); this._cover(-4.8, 61.0);
+    // Vehicle chicane south of the gatehouse: barriers stepping across the road
+    // from alternating kerbs. It slows the approach and reads as a checkpoint
+    // without standing a 6 m box in front of the level's hero silhouette.
+    for (let i = 0; i < 4; i++) P.jerseyBarrier(b, this.M.conc, -6.4 + i * 0.9, 0, 57.5 + i * 3.4, Math.PI / 2 - 0.25);
+    for (let i = 0; i < 4; i++) P.jerseyBarrier(b, this.M.conc, 6.4 - i * 0.9, 0, 59.5 + i * 3.4, Math.PI / 2 + 0.25);
+    this._container(this.M.cRed, 9.0, PAVE_Y, 55.0, 0.04);
+    this._cover(7.6, 55.0); this._cover(-5.6, 58.0); this._cover(5.6, 60.0);
 
     // Pavement clutter: drums, crates, tyres, pallets, chairs outside shops.
     for (let i = 0; i < 34; i++) {
@@ -1068,11 +1372,11 @@ export class Level {
       const x = s * (ROAD_HALF + 0.6 + R() * 3.0);
       const z = -28 + R() * 90;
       const r = R();
-      if (r < 0.22) P.oilDrum(b, this.M.rust, x, PAVE_Y, z, R() * 3, R() < 0.2);
-      else if (r < 0.44) P.crateStack(b, this.M.wood, x, PAVE_Y, z, R() * 3, R);
+      if (r < 0.22) P.oilDrum(b, this.M.steelProp, x, PAVE_Y, z, R() * 3, R() < 0.2);
+      else if (r < 0.44) P.crateStack(b, this.M.woodProp, x, PAVE_Y, z, R() * 3, R);
       else if (r < 0.58) P.tyre(b, this.M.dark, x, PAVE_Y, z, R() * 3, R() < 0.5);
-      else if (r < 0.7) P.pallet(b, this.M.wood, x, PAVE_Y + 0.01, z, R() * 3);
-      else if (r < 0.82) P.chair(b, this.M.wood, x, PAVE_Y, z, R() * 6, R() < 0.5);
+      else if (r < 0.7) P.pallet(b, this.M.woodProp, x, PAVE_Y + 0.01, z, R() * 3);
+      else if (r < 0.82) P.chair(b, this.M.woodProp, x, PAVE_Y, z, R() * 6, R() < 0.5);
       else b.box(this.M.conc, x, PAVE_Y, z, 0.5 + R() * 0.7, 0.4 + R() * 0.5, 0.5 + R() * 0.7, R() * 3);
     }
 

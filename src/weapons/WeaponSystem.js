@@ -38,6 +38,29 @@ export class WeaponSystem {
     this.onFire = null;  // (originWorld, dirWorld, isTracer) => void
   }
 
+  /**
+   * Swaps to another weapon definition, playing holster/draw across the cut.
+   * Everything downstream (spread, recoil pattern, viewmodel, hand grips) is
+   * driven off the def and the model's own anchors, so no other system needs
+   * to know which weapon is equipped.
+   */
+  setWeapon(def) {
+    if (!def || def === this.def) return;
+    const vm = this.engine.viewmodel;
+    vm.startHolster(0.28);
+    setTimeout(() => {
+      this.def = def;
+      this.ammo = def.magazine;
+      this.reserve = def.reserve;
+      this.spread = def.spread.hipBase;
+      this.reloading = false;
+      this.burst = 0;
+      this.nextShotTime = this.time + 0.1;
+      vm.setWeapon(def.id);
+      vm.startDraw(0.46);
+    }, 280);
+  }
+
   canFire() {
     return !this.reloading && this.ammo > 0 && this.time >= this.nextShotTime;
   }
