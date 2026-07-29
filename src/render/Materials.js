@@ -20,6 +20,19 @@ export const MATERIAL_DEFS = {
   militaryGreen: { surface: 'paintedMetal', tile: 2.5, seed: 61, normalStrength: 1.8, roughness: 1.0, metalness: 1.0, base: [0.19, 0.22, 0.16] },
   rustySteel:    { surface: 'paintedMetal', tile: 2.0, seed: 62, normalStrength: 2.2, roughness: 1.0, metalness: 1.0, base: [0.30, 0.28, 0.26] },
   gunmetal:      { surface: 'gunmetal',     tile: 0.5, seed: 71, normalStrength: 1.2, roughness: 1.0, metalness: 1.0 },
+
+  // Surfaces the level asks for by name. Without these entries the level's
+  // material lookup falls through to a flat untextured colour, which is why
+  // the alleys and shopfronts read as plain painted boxes.
+  brick:         { surface: 'brick',        tile: 3.0, seed: 81, normalStrength: 1.6, roughness: 1.0, metalness: 0.0 },
+  brickPale:     { surface: 'brick',        tile: 3.0, seed: 82, normalStrength: 1.6, roughness: 1.0, metalness: 0.0, base: [0.44, 0.33, 0.26] },
+  wood:          { surface: 'wood',         tile: 2.0, seed: 91, normalStrength: 1.4, roughness: 1.0, metalness: 0.0 },
+  tile:          { surface: 'tile',         tile: 1.6, seed: 101, normalStrength: 1.5, roughness: 1.0, metalness: 0.0 },
+  gravel:        { surface: 'gravel',       tile: 3.0, seed: 111, normalStrength: 1.8, roughness: 1.0, metalness: 0.0 },
+  tarp:          { surface: 'fabric',       tile: 2.0, seed: 121, normalStrength: 1.3, roughness: 1.0, metalness: 0.0 },
+  glass:         { surface: 'glass',        tile: 2.0, seed: 131, normalStrength: 0.6, roughness: 1.0, metalness: 0.0 },
+  roadLine:      { surface: 'roadLine',     tile: 4.0, seed: 141, normalStrength: 1.2, roughness: 1.0, metalness: 0.0 },
+  rustedIron:    { surface: 'rustedIron',   tile: 2.0, seed: 151, normalStrength: 2.0, roughness: 1.0, metalness: 1.0 },
 };
 
 export class MaterialLibrary {
