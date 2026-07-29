@@ -16,6 +16,18 @@ export { surfaceNames };
 const cache = new Map();
 const inflight = new Map();
 
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/**
+ * Load-time accounting. `cpuMs` is generation time measured inside the workers,
+ * `mainMs` is everything this module does on the main thread (unpacking the
+ * message and constructing DataTextures). Comparing cpuMs against the caller's
+ * wall clock is the only way to tell a slow generator apart from a pool that
+ * never got the cores it asked for, and comparing mainMs against wall time is
+ * the only way to prove the bake really is off the main thread.
+ */
+export const bakeStats = { jobs: 0, cpuMs: 0, mainMs: 0, workers: 0, sync: 0 };
+
 // ------------------------------- worker pool -------------------------------
 
 class BakePool {
@@ -47,6 +59,9 @@ class BakePool {
     const entry = this.pending.get(msg.id);
     this.pending.delete(msg.id);
     if (entry) {
+      bakeStats.jobs++;
+      bakeStats.cpuMs += (msg.result && msg.result.cpuMs) || 0;
+      bakeStats.workers = this.workers.length;
       if (msg.ok) entry.resolve(msg.result);
       else entry.reject(new Error(msg.error));
     }
@@ -61,9 +76,19 @@ class BakePool {
   }
 
   run(kind, name, size, seed, opts) {
-    const local = () => (kind === 'detail'
-      ? generateDetailNormal(name, size, seed, opts.worldSize, opts.amplitude)
-      : generateSurface(name, size, seed, opts));
+    const local = () => {
+      // The fallback runs on the main thread, so it is charged to mainMs — the
+      // point of the number is "how long was the first frame blocked", not
+      // "where in the file did the work happen".
+      const t = now();
+      const r = (kind === 'detail'
+        ? generateDetailNormal(name, size, seed, opts.worldSize, opts.amplitude)
+        : generateSurface(name, size, seed, opts));
+      bakeStats.mainMs += now() - t;
+      bakeStats.sync++;
+      bakeStats.jobs++;
+      return r;
+    };
     // Fall back to synchronous generation if workers are unavailable
     // (older browsers, file:// origins, or a worker that failed to boot).
     if (this.failed) return Promise.resolve().then(local);
@@ -163,7 +188,9 @@ export function bakeSurface(name, opts = {}) {
   if (inflight.has(key)) return inflight.get(key);
 
   const p = pool.run('surface', name, size, seed, opts).then((r) => {
+    const t = now();
     const maps = toMaps(r);
+    bakeStats.mainMs += now() - t;
     cache.set(key, maps);
     inflight.delete(key);
     return maps;
@@ -202,7 +229,12 @@ export function bakeDetailNormal(family, opts = {}) {
   const key = `${family}|${size}|${seed}|${worldSize}|${amplitude}`;
   if (detailCache.has(key)) return detailCache.get(key);
   const p = pool.run('detail', family, size, seed, { worldSize, amplitude })
-    .then((r) => normalToTexture(r.normal, r.size));
+    .then((r) => {
+      const t = now();
+      const tex = normalToTexture(r.normal, r.size);
+      bakeStats.mainMs += now() - t;
+      return tex;
+    });
   detailCache.set(key, p);
   return p;
 }

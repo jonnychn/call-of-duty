@@ -1,16 +1,23 @@
 import { generateSurface, generateDetailNormal } from './SurfaceGen.js';
 
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
 self.onmessage = (e) => {
   const { id, kind, name, size, seed, opts } = e.data;
+  const t0 = now();
   try {
     if (kind === 'detail') {
       // Micro-normal tile: one buffer, no albedo or ORM.
       const o = opts || {};
       const r = generateDetailNormal(name, size, seed, o.worldSize, o.amplitude);
+      r.cpuMs = now() - t0;
       self.postMessage({ id, ok: true, result: r }, [r.normal.buffer]);
       return;
     }
     const r = generateSurface(name, size, seed, opts || {});
+    // Reported back so the pool can separate "the bake is slow" from "the pool
+    // is not getting cores" — the two have completely different fixes.
+    r.cpuMs = now() - t0;
     // Albedo, tangent-space normal, and packed ORM — three buffers, all
     // transferred rather than copied so a 1024² set costs nothing to hand back.
     self.postMessage({ id, ok: true, result: r }, [r.rgb.buffer, r.normal.buffer, r.orm.buffer]);

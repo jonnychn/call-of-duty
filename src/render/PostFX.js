@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { Pass, FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -34,6 +33,223 @@ const NEUTRAL_RT = {
 const LUMA = /* glsl */`
   float luma( vec3 c ) { return dot( c, vec3( 0.2126, 0.7152, 0.0722 ) ); }
 `;
+
+// ---------------------------------------------------------------------------
+// Bloom.
+//
+// Replaces three's UnrealBloomPass, which on this chain was leaving the shared
+// read buffer black — the frame arriving at the tonemap was exactly zero, and
+// multiplying exposure by 8 changed nothing, which is how it was caught. This
+// is also simply the better filter: a progressive downsample with the 13-tap
+// partial-Karis kernel and a 9-tap tent upsample (the Call of Duty: Advanced
+// Warfare "next generation post processing" chain). It gives a wide, stable,
+// energy-preserving glow with no fireflies and no visible mip banding, at
+// about half the bandwidth of five separable Gaussians.
+//
+// All accumulation is explicit inside the shaders — nothing relies on hardware
+// blend state, so no other pass can disturb it.
+// ---------------------------------------------------------------------------
+
+class BloomPass extends Pass {
+  constructor(width, height, mips) {
+    super();
+    // Deliberately does not write to the composer's read/write buffers: it
+    // only produces a texture, which the tonemap pass adds in HDR just before
+    // the film curve. That is where bloom physically belongs (it is lens and
+    // sensor scatter, not a display-space effect), it saves a full-resolution
+    // composite pass, and it keeps the pass unable to disturb the chain.
+    this.needsSwap = false;
+    this.strength = 0.34;
+    this.threshold = 1.05;
+    this.softKnee = 0.55;
+    this.maxMips = Math.max(2, Math.min(7, mips | 0));
+
+    /** @type {THREE.WebGLRenderTarget[]} */
+    this.down = [];
+    /** @type {THREE.WebGLRenderTarget[]} */
+    this.up = [];
+
+    this.prefilterMat = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },
+        texelSize: { value: new THREE.Vector2() },
+        threshold: { value: 1.05 },
+        knee: { value: 0.55 },
+      },
+      vertexShader: QUAD_VS,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        uniform vec2 texelSize;
+        uniform float threshold;
+        uniform float knee;
+        varying vec2 vUv;
+        ${LUMA}
+        void main() {
+          // 4-tap box prefilter doubles as the first halving and kills the
+          // single-pixel fireflies that specular highlights throw off.
+          vec3 c = (
+            texture2D( tDiffuse, vUv + texelSize * vec2( -1.0, -1.0 ) ).rgb +
+            texture2D( tDiffuse, vUv + texelSize * vec2(  1.0, -1.0 ) ).rgb +
+            texture2D( tDiffuse, vUv + texelSize * vec2( -1.0,  1.0 ) ).rgb +
+            texture2D( tDiffuse, vUv + texelSize * vec2(  1.0,  1.0 ) ).rgb
+          ) * 0.25;
+
+          // Soft knee: a hard threshold makes bloom pop on and off as things
+          // cross it, which reads as flicker in motion.
+          float l = max( luma( c ), 1e-5 );
+          float k = knee * threshold + 1e-5;
+          float soft = clamp( l - threshold + k, 0.0, 2.0 * k );
+          soft = soft * soft / ( 4.0 * k );
+          float w = max( soft, l - threshold ) / l;
+          gl_FragColor = vec4( c * clamp( w, 0.0, 1.0 ), 1.0 );
+        }
+      `,
+      depthTest: false, depthWrite: false,
+    });
+
+    this.downMat = new THREE.ShaderMaterial({
+      uniforms: { tDiffuse: { value: null }, texelSize: { value: new THREE.Vector2() } },
+      vertexShader: QUAD_VS,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        uniform vec2 texelSize;
+        varying vec2 vUv;
+        void main() {
+          vec2 t = texelSize;
+          vec3 a = texture2D( tDiffuse, vUv + t * vec2( -2.0,  2.0 ) ).rgb;
+          vec3 b = texture2D( tDiffuse, vUv + t * vec2(  0.0,  2.0 ) ).rgb;
+          vec3 c = texture2D( tDiffuse, vUv + t * vec2(  2.0,  2.0 ) ).rgb;
+          vec3 d = texture2D( tDiffuse, vUv + t * vec2( -2.0,  0.0 ) ).rgb;
+          vec3 e = texture2D( tDiffuse, vUv                          ).rgb;
+          vec3 f = texture2D( tDiffuse, vUv + t * vec2(  2.0,  0.0 ) ).rgb;
+          vec3 g = texture2D( tDiffuse, vUv + t * vec2( -2.0, -2.0 ) ).rgb;
+          vec3 h = texture2D( tDiffuse, vUv + t * vec2(  0.0, -2.0 ) ).rgb;
+          vec3 i = texture2D( tDiffuse, vUv + t * vec2(  2.0, -2.0 ) ).rgb;
+          vec3 j = texture2D( tDiffuse, vUv + t * vec2( -1.0,  1.0 ) ).rgb;
+          vec3 k = texture2D( tDiffuse, vUv + t * vec2(  1.0,  1.0 ) ).rgb;
+          vec3 l = texture2D( tDiffuse, vUv + t * vec2( -1.0, -1.0 ) ).rgb;
+          vec3 m = texture2D( tDiffuse, vUv + t * vec2(  1.0, -1.0 ) ).rgb;
+          vec3 o = e * 0.125;
+          o += ( a + c + g + i ) * 0.03125;
+          o += ( b + d + f + h ) * 0.0625;
+          o += ( j + k + l + m ) * 0.125;
+          gl_FragColor = vec4( o, 1.0 );
+        }
+      `,
+      depthTest: false, depthWrite: false,
+    });
+
+    this.upMat = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },   // the smaller, already-accumulated level
+        tBase: { value: null },      // this level's own downsample
+        texelSize: { value: new THREE.Vector2() },
+        radius: { value: 1.0 },
+      },
+      vertexShader: QUAD_VS,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tBase;
+        uniform vec2 texelSize;
+        uniform float radius;
+        varying vec2 vUv;
+        void main() {
+          vec2 t = texelSize * radius;
+          // 9-tap tent.
+          vec3 o =
+            texture2D( tDiffuse, vUv + t * vec2( -1.0,  1.0 ) ).rgb * 1.0 +
+            texture2D( tDiffuse, vUv + t * vec2(  0.0,  1.0 ) ).rgb * 2.0 +
+            texture2D( tDiffuse, vUv + t * vec2(  1.0,  1.0 ) ).rgb * 1.0 +
+            texture2D( tDiffuse, vUv + t * vec2( -1.0,  0.0 ) ).rgb * 2.0 +
+            texture2D( tDiffuse, vUv                          ).rgb * 4.0 +
+            texture2D( tDiffuse, vUv + t * vec2(  1.0,  0.0 ) ).rgb * 2.0 +
+            texture2D( tDiffuse, vUv + t * vec2( -1.0, -1.0 ) ).rgb * 1.0 +
+            texture2D( tDiffuse, vUv + t * vec2(  0.0, -1.0 ) ).rgb * 2.0 +
+            texture2D( tDiffuse, vUv + t * vec2(  1.0, -1.0 ) ).rgb * 1.0;
+          o *= 1.0 / 16.0;
+          gl_FragColor = vec4( texture2D( tBase, vUv ).rgb + o, 1.0 );
+        }
+      `,
+      depthTest: false, depthWrite: false,
+    });
+
+    this.quad = new FullScreenQuad(this.prefilterMat);
+    this.setSize(width, height);
+  }
+
+  setSize(width, height) {
+    // EffectComposer.setSize already calls this, and PostFX.setSize calls it
+    // again; reallocating the whole mip chain twice per resize is pure waste.
+    if (this._w === width && this._h === height) return;
+    this._w = width; this._h = height;
+    for (const rt of this.down) rt.dispose();
+    for (const rt of this.up) rt.dispose();
+    this.down.length = 0;
+    this.up.length = 0;
+
+    let w = Math.max(1, Math.floor(width / 2));
+    let h = Math.max(1, Math.floor(height / 2));
+    for (let i = 0; i < this.maxMips && w > 2 && h > 2; i++) {
+      this.down.push(new THREE.WebGLRenderTarget(w, h, NEUTRAL_RT));
+      // The largest level is written by the upsample chain too, so it needs a
+      // second target; the smallest never is.
+      if (i < this.maxMips - 1) this.up.push(new THREE.WebGLRenderTarget(w, h, NEUTRAL_RT));
+      w = Math.max(1, w >> 1);
+      h = Math.max(1, h >> 1);
+    }
+    this._srcTexel = new THREE.Vector2(1 / Math.max(1, width), 1 / Math.max(1, height));
+  }
+
+  render(renderer, writeBuffer, readBuffer) {
+    const n = this.down.length;
+    const u = this.prefilterMat.uniforms;
+    u.tDiffuse.value = readBuffer.texture;
+    u.texelSize.value.copy(this._srcTexel);
+    u.threshold.value = this.threshold;
+    u.knee.value = this.softKnee;
+    this.quad.material = this.prefilterMat;
+    renderer.setRenderTarget(this.down[0]);
+    this.quad.render(renderer);
+
+    for (let i = 1; i < n; i++) {
+      const src = this.down[i - 1];
+      this.downMat.uniforms.tDiffuse.value = src.texture;
+      this.downMat.uniforms.texelSize.value.set(1 / src.width, 1 / src.height);
+      this.quad.material = this.downMat;
+      renderer.setRenderTarget(this.down[i]);
+      this.quad.render(renderer);
+    }
+
+    // Upsample back up, adding each level's own detail as we go.
+    let smaller = this.down[n - 1];
+    for (let i = n - 2; i >= 0; i--) {
+      const dst = this.up[i];
+      this.upMat.uniforms.tDiffuse.value = smaller.texture;
+      this.upMat.uniforms.tBase.value = this.down[i].texture;
+      this.upMat.uniforms.texelSize.value.set(1 / smaller.width, 1 / smaller.height);
+      this.quad.material = this.upMat;
+      renderer.setRenderTarget(dst);
+      this.quad.render(renderer);
+      smaller = dst;
+    }
+
+    this._result = smaller.texture;
+  }
+
+  /** @returns {THREE.Texture} the accumulated glow, at half resolution. */
+  get result() { return this._result || this.down[0].texture; }
+
+  /** Strength normalised so it stays comparable as the mip count changes. */
+  get effectiveStrength() { return this.strength / Math.max(1, this.down.length - 1); }
+
+  dispose() {
+    for (const rt of this.down) rt.dispose();
+    for (const rt of this.up) rt.dispose();
+    this.prefilterMat.dispose(); this.downMat.dispose();
+    this.upMat.dispose();
+    this.quad.dispose();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // God rays. Screen-space radial march from the sun's projected position over
@@ -343,6 +559,8 @@ const TonemapShader = {
     tDirt: { value: null },
     tAdapt: { value: null },
     tRays: { value: null },
+    tBloom: { value: null },
+    bloomStrength: { value: 0.0 },
     resolution: { value: new THREE.Vector2(1, 1) },
     time: { value: 0 },
 
@@ -380,6 +598,8 @@ const TonemapShader = {
     uniform sampler2D tDirt;
     uniform sampler2D tAdapt;
     uniform sampler2D tRays;
+    uniform sampler2D tBloom;
+    uniform float bloomStrength;
     uniform vec2 resolution;
     uniform float time;
 
@@ -445,6 +665,10 @@ const TonemapShader = {
       col.r = texture2D( tDiffuse, uv - dir * ca ).r;
       col.g = texture2D( tDiffuse, uv ).g;
       col.b = texture2D( tDiffuse, uv + dir * ca ).b;
+
+      // Bloom, added in scene-referred HDR so it rolls through the film
+      // curve with everything else rather than sitting on top of it.
+      if ( bloomStrength > 0.0 ) col += texture2D( tBloom, uv ).rgb * bloomStrength;
 
       // ---- lens veiling + ghosts (scene-referred, so they tonemap) --------
       if ( flare > 0.001 && sunOnScreen > 0.001 ) {
@@ -639,12 +863,9 @@ export class PostFX {
     this.godrays.enabled = settings.volumetrics;
     this.composer.addPass(this.godrays);
 
-    this.bloom = new UnrealBloomPass(
-      new THREE.Vector2(size.x, size.y),
-      settings.bloomStrength,
-      0.75,            // radius
-      settings.bloomThreshold,
-    );
+    this.bloom = new BloomPass(size.x, size.y, settings.bloomMips);
+    this.bloom.strength = settings.bloomStrength;
+    this.bloom.threshold = settings.bloomThreshold;
     this.bloom.enabled = settings.bloom;
     this.composer.addPass(this.bloom);
 
@@ -657,6 +878,9 @@ export class PostFX {
     this.tonemap.uniforms.tDirt.value = this.dirt;
     this.tonemap.uniforms.tAdapt.value = this.exposurePass.result;
     this.tonemap.uniforms.tRays.value = this.godrays.rays;
+    this.tonemap.uniforms.tBloom.value = this.bloom.result;
+    this.tonemap.uniforms.bloomStrength.value =
+      this.bloom.enabled ? this.bloom.effectiveStrength : 0.0;
     this.composer.addPass(this.tonemap);
     // Backwards-compatible alias: HUD/FX poke `grade` for flash and damage.
     this.grade = this.tonemap;

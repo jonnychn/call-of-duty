@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { bakeAll, bakeDetailNormal } from './TextureBaker.js';
+import { bakeAll, bakeDetailNormal, bakeStats } from './TextureBaker.js';
 import { settings } from '../core/Settings.js';
 
 // ---------------------------------------------------------------------------
@@ -289,12 +289,21 @@ export class MaterialLibrary {
       materials: Object.keys(MATERIAL_DEFS).length,
       detailTiles: families.length,
       textureMB: +(bytes / (1024 * 1024)).toFixed(1),
+      // Generation time summed across the pool, main-thread time, and the
+      // speedup actually achieved. `cpuMs / ms` below 1.5 on a 4-core machine
+      // means the workers are starved, not that the generators are slow.
+      cpuMs: Math.round(bakeStats.cpuMs),
+      mainMs: Math.round(bakeStats.mainMs),
+      workers: bakeStats.workers,
+      parallelism: +(bakeStats.cpuMs / Math.max(1, ms)).toFixed(2),
     };
     // Surfaced deliberately: bake time and texture memory are the two numbers
     // this library can silently ruin, so they should never need a profiler.
     console.info(
       `[materials] ${this.stats.materials} materials + ${this.stats.detailTiles} detail tiles `
-      + `in ${this.stats.ms} ms, ~${this.stats.textureMB} MB VRAM`,
+      + `in ${this.stats.ms} ms wall (${this.stats.cpuMs} ms worker CPU across `
+      + `${this.stats.workers} workers, ${this.stats.parallelism}× parallel; `
+      + `${this.stats.mainMs} ms on the main thread), ~${this.stats.textureMB} MB VRAM`,
     );
     this.ready = true;
     return this.materials;
