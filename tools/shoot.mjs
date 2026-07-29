@@ -43,12 +43,26 @@ const POSES = {
   sunGlare:    { pos: [0, 1.6, 20], yaw: 236, pitch: 8 },
   ground:      { pos: [4, 1.6, 30], yaw: 190, pitch: -42 },
   wall:        { pos: [-20.5, 1.6, 6], yaw: 90, pitch: 0 },
+
+  // --- level-design poses -------------------------------------------------
+  arch:        { pos: [0, 1.6, 56], yaw: 180, pitch: 4 },       // under the gatehouse
+  throughArch: { pos: [0, 1.6, 78], yaw: 0, pitch: 2 },         // looking back south
+  courtyard:   { pos: [22, 1.6, 47], yaw: 195, pitch: 3 },      // market yard + stair
+  shopFront:   { pos: [-4.5, 1.6, 28.4], yaw: 90, pitch: 0 },   // shopfront from the road
+  shopIn:      { pos: [-13.5, 1.6, 28.6], yaw: 110, pitch: -2 },// inside the shop
+  rooftop:     { pos: [16, 8.0, 24], yaw: 145, pitch: -8 },     // east roof over the street
+  market:      { pos: [-18, 1.6, 1], yaw: 178, pitch: 2 },      // southern square
+  alleyDeep:   { pos: [-24, 1.6, -11.5], yaw: 270, pitch: 0 },  // alley toward the street
+  minaret:     { pos: [-2, 1.6, 86], yaw: 165, pitch: 14 },     // far quarter landmark
+  terrace:     { pos: [27.5, 7.0, 58], yaw: 215, pitch: -6 },   // courtyard terrace
 };
 
 const SHOT_SETS = {
   default: ['street', 'alley', 'vista', 'containers', 'weapon', 'sunGlare'],
   quick: ['street', 'weapon'],
   materials: ['ground', 'wall', 'containers'],
+  level: ['street', 'arch', 'courtyard', 'shopFront', 'shopIn', 'rooftop', 'market', 'alleyDeep'],
+  level2: ['throughArch', 'minaret', 'terrace', 'vista', 'alley', 'sunGlare'],
   all: Object.keys(POSES),
 };
 

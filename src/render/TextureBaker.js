@@ -123,14 +123,20 @@ function rgbaToTexture(rgba, size) {
 }
 
 function toMaps(r) {
-  const maps = {
+  // Occlusion / roughness / metalness are packed into one RGB texture using
+  // the glTF convention. MeshStandardMaterial samples .r for aoMap, .g for
+  // roughnessMap and .b for metalnessMap, so the same texture object can fill
+  // all three slots — one upload and one sampler instead of three.
+  const orm = rgbaToTexture(r.orm, r.size);
+  return {
     map: rgbToTexture(r.rgb, r.size),
     normalMap: rgbaToTexture(r.normal, r.size),
-    roughnessMap: rgbaToTexture(r.rough, r.size),
-    aoMap: rgbaToTexture(r.ao, r.size),
+    ormMap: orm,
+    aoMap: orm,
+    roughnessMap: orm,
+    metalnessMap: orm,
+    detail: r.detail,
   };
-  if (r.metal) maps.metalnessMap = rgbaToTexture(r.metal, r.size);
-  return maps;
 }
 
 // --------------------------------- API -------------------------------------
@@ -175,8 +181,13 @@ export async function bakeAll(requests, onProgress) {
 }
 
 export function disposeTextureCache() {
+  // A map set aliases one ORM texture across three slots, so dedupe before
+  // disposing rather than calling dispose() on the same texture four times.
+  const seen = new Set();
   for (const set of cache.values()) {
-    for (const v of Object.values(set)) if (v && v.isTexture) v.dispose();
+    for (const v of Object.values(set)) {
+      if (v && v.isTexture && !seen.has(v)) { seen.add(v); v.dispose(); }
+    }
   }
   cache.clear();
   pool.dispose();

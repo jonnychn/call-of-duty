@@ -1,221 +1,501 @@
 import * as THREE from 'three';
+import {
+  Batch, gBox, gChamfer, gCyl, gRod, gTube, gScrew, gSpring, gunMaterials, planarUV,
+} from './GunKit.js';
 
 // ---------------------------------------------------------------------------
-// Procedural 5.56 carbine. Built from primitives but detailed enough to read
-// as a real weapon at viewmodel distance: free-float rail with slots, A2 flash
-// hider, ejection port, charging handle, magwell, adjustable stock, optic.
+// Procedural weapons. Authored in metres, muzzle-forward along -Z, bore on the
+// Y=0 axis, and returned with named sub-groups the animation layer drives.
 //
-// The model is authored in metres, muzzle-forward along -Z, and returned with
-// named sub-objects the animation layer drives (bolt, charging handle, mag).
+// Everything is chamfered and batched: see GunKit.js. Two weapons are built
+// from the same kit — a 5.56 carbine and a 9 mm PDW — so the rig, the hand
+// solver and the animation layer are all proven to be weapon-agnostic.
 // ---------------------------------------------------------------------------
 
-function mat(color, roughness, metalness, extra = {}) {
-  return new THREE.MeshStandardMaterial({
-    color: new THREE.Color(color),
-    roughness,
-    metalness,
-    envMapIntensity: 1.2,
-    ...extra,
-  });
+const TAU = Math.PI * 2;
+
+// ------------------------------- sub-assemblies -----------------------------
+
+/** M-LOK / KeyMod style handguard: octagonal tube with recessed slots. */
+function handguard(b, M, { z0, z1, r, slots = 4, mat }) {
+  const len = z1 - z0, cz = (z0 + z1) / 2;
+  const wall = 0.0038;
+  // Octagonal shell as one lathe-free extrusion: eight chamfered panels.
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * TAU + Math.PI / 8;
+    const w = r * 0.792;
+    b.add(mat, gChamfer(w, wall, len, Math.cos(a) * r, Math.sin(a) * r, cz, 0, 0, a + Math.PI / 2, 0.0009));
+    // M-LOK slots are *recessed*: a darker inset panel a hair below the flat,
+    // so the silhouette stays clean and thin geometry can't shimmer.
+    if (i === 0 || i === 2 || i === 4 || i === 6 || i === 5 || i === 3) {
+      for (let s = 0; s < slots; s++) {
+        const z = z0 + len * ((s + 0.75) / (slots + 0.5));
+        const d = r - wall * 0.62;
+        b.add(M.steel, gChamfer(w * 0.46, 0.0016, 0.024, Math.cos(a) * d, Math.sin(a) * d, z, 0, 0, a + Math.PI / 2, 0.0004));
+      }
+    }
+  }
+  // Front and rear reinforcing collars.
+  b.add(mat, gTube(r + 0.0022, r - 0.004, 0.010, 16, 0, 0, z0 + 0.006));
+  b.add(M.alu, gTube(r + 0.0030, r - 0.004, 0.014, 16, 0, 0, z1 - 0.008));
+  // Anti-rotation screws around the rear collar, each lying flat on its facet.
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU + Math.PI / 4;
+    const s = gScrew(0.0019, 0, 0, 0, 'y', 0.0010);
+    s.rotateZ(a - Math.PI / 2);
+    s.translate(Math.cos(a) * (r + 0.0026), Math.sin(a) * (r + 0.0026), z1 - 0.008);
+    b.add(M.bright, s);
+  }
 }
 
-function box(m, w, h, d, x, y, z, rx = 0, ry = 0, rz = 0) {
-  const g = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
-  g.position.set(x, y, z);
-  g.rotation.set(rx, ry, rz);
-  g.castShadow = true;
+/** Picatinny rail: a base bar plus chamfered ribs with real gaps between. */
+function picatinny(b, M, { z0, z1, y, w = 0.0208, pitch = 0.0102 }) {
+  const len = z1 - z0;
+  b.add(M.alu, gChamfer(w, 0.0042, len, 0, y, (z0 + z1) / 2, 0, 0, 0, 0.0006));
+  const n = Math.max(1, Math.floor(len / pitch));
+  const ribW = 0.0055;
+  for (let i = 0; i < n; i++) {
+    const z = z0 + pitch * 0.5 + i * pitch;
+    // Trapezoidal rib: wider at the base, chamfered top — the classic profile.
+    b.add(M.alu, gChamfer(w, 0.0030, ribW, 0, y + 0.0034, z, 0, 0, 0, 0.0009));
+  }
+  return y + 0.0049; // top of rail
+}
+
+/** Aimpoint-style red dot with a coated lens, a tube shadow and a hot dot. */
+function redDot(M, { y, z, tube = 0.0158 }) {
+  const g = new THREE.Group();
+  g.name = 'optic';
+  const b = new Batch();
+
+  const len = 0.084;
+  // Body: tube plus the boss for the turrets and the battery cap.
+  b.add(M.opticBody, gTube(tube, tube - 0.0026, len, 24, 0, y, z));
+  b.add(M.opticBody, gRod(tube + 0.0028, 0.0075, 24, 0, y, z - len / 2 + 0.004));
+  b.add(M.opticBody, gRod(tube + 0.0028, 0.0075, 24, 0, y, z + len / 2 - 0.004));
+  b.add(M.opticBody, gChamfer(0.0235, 0.0165, 0.030, 0, y - 0.0035, z + 0.004, 0, 0, 0, 0.0012));
+  // Turrets: elevation on top, windage on the right, both capped and knurled.
+  for (const [ax, px, py] of [['y', 0, y + tube + 0.004], ['x', tube + 0.004, y]]) {
+    b.add(M.opticBody, gRod(0.0072, 0.011, 14, px, py, z + 0.004, ax));
+    b.add(M.alu, gRod(0.0058, 0.004, 14, ax === 'y' ? 0 : px + 0.007, ax === 'y' ? py + 0.007 : py, z + 0.004, ax));
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * TAU;
+      const rr = 0.0072;
+      if (ax === 'y') b.add(M.opticBody, gBox(0.0008, 0.011, 0.0016, Math.cos(a) * rr, py, z + 0.004 + Math.sin(a) * rr, 0, -a, 0));
+    }
+  }
+  // Battery compartment on the left.
+  b.add(M.opticBody, gRod(0.0068, 0.010, 14, -tube - 0.004, y, z + 0.004, 'x'));
+  // Mount: quick-detach throw lever clamp.
+  b.add(M.opticBody, gChamfer(0.0245, 0.021, 0.044, 0, y - 0.0245, z + 0.002, 0, 0, 0, 0.0012));
+  b.add(M.alu, gChamfer(0.0325, 0.0075, 0.050, 0, y - 0.0345, z + 0.002, 0, 0, 0, 0.0010));
+  b.add(M.bright, gChamfer(0.0075, 0.014, 0.030, -0.0175, y - 0.030, z + 0.002, 0, 0, 0.18, 0.0008));
+  b.add(M.bright, gScrew(0.0026, 0, y - 0.014, z - 0.016, 'y'));
+  b.add(M.bright, gScrew(0.0026, 0, y - 0.014, z + 0.020, 'y'));
+  // Killflash / sunshade ribs at the objective end.
+  for (let i = 0; i < 3; i++) {
+    b.add(M.opticBody, gTube(tube + 0.0012, tube - 0.0006, 0.0022, 24, 0, y, z - len / 2 - 0.004 - i * 0.006));
+  }
+  b.flush(g, 'optic');
+
+  // ---- glass -------------------------------------------------------------
+  // Objective lens: a shallow spherical cap with a strong blue-violet coating.
+  const lensMat = new THREE.MeshPhysicalMaterial({
+    name: 'lens',
+    color: 0x0c1a2c, roughness: 0.04, metalness: 0.35,
+    transparent: true, opacity: 0.34, envMapIntensity: 3.2,
+    clearcoat: 1.0, clearcoatRoughness: 0.02,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const capGeo = new THREE.SphereGeometry(0.055, 20, 8, 0, TAU, 0, 0.28);
+  capGeo.scale(1, 1, 0.42);
+  capGeo.rotateX(-Math.PI / 2);
+  const front = new THREE.Mesh(capGeo.clone(), lensMat);
+  front.position.set(0, y, z - len / 2 + 0.010);
+  front.renderOrder = 4;
+  g.add(front);
+  const rear = new THREE.Mesh(capGeo.clone().rotateX(Math.PI), lensMat);
+  rear.position.set(0, y, z + len / 2 - 0.010);
+  rear.renderOrder = 4;
+  g.add(rear);
+
+  // Coating flare: an additive ring that catches the key light like AR glass.
+  const flareMat = new THREE.MeshBasicMaterial({
+    color: 0x2f6bd0, transparent: true, opacity: 0.16,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+  const flare = new THREE.Mesh(new THREE.CircleGeometry(tube - 0.0028, 24), flareMat);
+  flare.position.set(0, y, z - len / 2 + 0.013);
+  flare.renderOrder = 5;
+  g.add(flare);
+
+  // ---- reticle -----------------------------------------------------------
+  // Emissive well above 1.0 so bloom picks it up and it survives ACES.
+  const dotMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(9.0, 0.55, 0.18),
+    transparent: true, blending: THREE.AdditiveBlending,
+    depthWrite: false, depthTest: true, toneMapped: true,
+  });
+  const reticle = new THREE.Group();
+  reticle.name = 'reticle';
+  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.00085, 16), dotMat);
+  reticle.add(dot);
+  const haloMat = dotMat.clone();
+  haloMat.color = new THREE.Color(2.2, 0.14, 0.05);
+  haloMat.opacity = 0.55;
+  const halo = new THREE.Mesh(new THREE.CircleGeometry(0.0034, 20), haloMat);
+  halo.position.z = 0.0004;
+  reticle.add(halo);
+  // Faint red wash on the glass — the light the emitter throws on the coating.
+  const washMat = dotMat.clone();
+  washMat.color = new THREE.Color(0.45, 0.045, 0.02);
+  washMat.opacity = 0.5;
+  const wash = new THREE.Mesh(new THREE.CircleGeometry(tube - 0.003, 20), washMat);
+  wash.position.z = 0.0008;
+  reticle.add(wash);
+  // The reticle floats at the *front* lens: that is what gives the parallax
+  // you expect when your head moves off-axis.
+  reticle.position.set(0, y, z - len / 2 + 0.014);
+  reticle.renderOrder = 6;
+  g.add(reticle);
+
+  g.userData.reticle = reticle;
+  g.userData.dotMat = dotMat;
+  g.userData.haloMat = haloMat;
+  g.userData.sightAxis = y;
   return g;
 }
 
-function cyl(m, rt, rb, h, seg, x, y, z, axis = 'z') {
-  const g = new THREE.CylinderGeometry(rt, rb, h, seg);
-  if (axis === 'z') g.rotateX(Math.PI / 2);
-  else if (axis === 'x') g.rotateZ(Math.PI / 2);
-  const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(x, y, z);
-  mesh.castShadow = true;
-  return mesh;
+/** STANAG-pattern polymer magazine with a witness window and floor plate. */
+function magazine(M, { curve = 0.16, len = 0.155, w = 0.0228, d = 0.040 }) {
+  const g = new THREE.Group();
+  g.name = 'magazine';
+  const b = new Batch();
+  const segs = 4;
+  for (let i = 0; i < segs; i++) {
+    const t = i / (segs - 1);
+    const a = curve * t;
+    const y = -0.012 - t * len;
+    const z = -0.028 + Math.sin(a) * len * 0.62;
+    const dd = d * (1 - t * 0.06);
+    b.add(M.poly, gChamfer(w, len / segs + 0.010, dd, 0, y, z, a, 0, 0, 0.0012));
+    // Reinforcing rib on each side
+    b.add(M.poly, gChamfer(w + 0.0016, 0.0035, dd * 0.78, 0, y - 0.006, z, a, 0, 0, 0.0006));
+  }
+  // Witness window: recessed slot showing brass.
+  b.add(M.brass, gChamfer(w * 0.42, 0.030, 0.004, w * 0.5 - 0.0012, -0.075, -0.014, curve * 0.5, 0, 0, 0.0004));
+  // Floor plate + base pad
+  b.add(M.rubber, gChamfer(w + 0.0035, 0.014, d * 0.98, 0, -0.012 - len - 0.006, -0.028 + Math.sin(curve) * len * 0.62 + 0.004, curve, 0, 0, 0.0018));
+  b.add(M.bright, gScrew(0.0018, 0, -0.012 - len - 0.013, -0.020, 'y'));
+  // Top: follower and a visible round.
+  b.add(M.brass, gRod(0.0028, 0.030, 10, 0, -0.006, -0.030, 'z'));
+  b.add(M.bright, gChamfer(w - 0.004, 0.004, d * 0.8, 0, -0.010, -0.030, 0, 0, 0, 0.0006));
+  b.flush(g, 'mag');
+  return g;
 }
 
+/** Collapsible carbine stock on a buffer tube. */
+function stockAssembly(M, { z0, y }) {
+  const g = new THREE.Group();
+  g.name = 'stock';
+  const b = new Batch();
+  const bodyZ = z0 + 0.058;
+  // Shell around the buffer tube
+  b.add(M.fde, gChamfer(0.0405, 0.049, 0.096, 0, y - 0.001, bodyZ, 0, 0, 0, 0.0022));
+  // Lightening cut on both sides
+  b.add(M.poly, gChamfer(0.043, 0.020, 0.052, 0, y + 0.004, bodyZ - 0.004, 0, 0, 0, 0.0016));
+  // Cheek weld ridge
+  b.add(M.fde, gChamfer(0.030, 0.010, 0.086, 0, y + 0.026, bodyZ, 0, 0, 0, 0.0018));
+  // Sling loop cut-out and QD socket
+  b.add(M.alu, gTube(0.0055, 0.0032, 0.008, 12, 0.0205, y - 0.004, bodyZ - 0.030, 'x'));
+  // Adjustment lever under the tube
+  b.add(M.poly, gChamfer(0.014, 0.020, 0.038, 0, y - 0.030, bodyZ + 0.008, 0.25, 0, 0, 0.0012));
+  b.add(M.bright, gRod(0.0022, 0.020, 8, 0, y - 0.038, bodyZ + 0.014, 'x'));
+  // Butt pad: rubber, angled, with a serrated face
+  const padZ = bodyZ + 0.055;
+  b.add(M.rubber, gChamfer(0.0435, 0.062, 0.016, 0, y - 0.004, padZ, -0.10, 0, 0, 0.0028));
+  for (let i = 0; i < 5; i++) {
+    b.add(M.rubber, gChamfer(0.0405, 0.0045, 0.006, 0, y - 0.026 + i * 0.012, padZ + 0.008, -0.10, 0, 0, 0.0008));
+  }
+  b.flush(g, 'stock');
+  return g;
+}
+
+// ------------------------------- the carbine --------------------------------
+
 export function buildCarbine(materials) {
+  const M = gunMaterials();
   const root = new THREE.Group();
   root.name = 'Carbine';
+  const b = new Batch();
 
-  const steel = materials?.gunmetal || mat(0x2a2c30, 0.42, 1.0);
-  const black = mat(0x1b1d20, 0.58, 0.35);
-  const polymer = mat(0x232527, 0.72, 0.05);
-  const darkPoly = mat(0x18191b, 0.66, 0.05);
-  const anodized = mat(0x35383c, 0.34, 1.0);
+  const RAIL_Y = 0.0272;      // top of the receiver flat-top
+  const MUZZLE_Z = -0.556;
 
   // ------------------------------- barrel ---------------------------------
-  const barrel = cyl(steel, 0.0092, 0.0105, 0.40, 20, 0, 0.0, -0.30);
-  root.add(barrel);
+  b.add(M.steel, gRod(0.0094, 0.215, 18, 0, 0, -0.398));            // exposed
+  b.add(M.steel, gRod(0.0112, 0.185, 18, 0, 0, -0.200));            // under rail
+  b.add(M.steel, gRod(0.0132, 0.020, 18, 0, 0, -0.098));            // barrel nut
+  for (let i = 0; i < 14; i++) {                                      // nut splines
+    const a = (i / 14) * TAU;
+    b.add(M.steel, gBox(0.0026, 0.0032, 0.018, Math.cos(a) * 0.0134, Math.sin(a) * 0.0134, -0.098, 0, 0, a));
+  }
 
-  // Flash hider with prong slots
-  const fh = cyl(steel, 0.0125, 0.0125, 0.055, 16, 0, 0, -0.523);
-  root.add(fh);
+  // A2-style flash hider with five prong slots and a crush washer.
+  b.add(M.steel, gRod(0.0128, 0.052, 16, 0, 0, MUZZLE_Z + 0.028));
+  b.add(M.bright, gTube(0.0136, 0.0104, 0.0035, 16, 0, 0, MUZZLE_Z + 0.056));
   for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * Math.PI * 2;
-    const slot = box(black, 0.004, 0.020, 0.030, Math.cos(a) * 0.010, Math.sin(a) * 0.010, -0.532, 0, 0, a);
-    root.add(slot);
+    const a = (i / 5) * TAU + 0.3;
+    b.add(M.poly, gBox(0.0042, 0.010, 0.030, Math.cos(a) * 0.0098, Math.sin(a) * 0.0098, MUZZLE_Z + 0.020, 0, 0, a));
   }
+  b.add(M.poly, gTube(0.0116, 0.0042, 0.004, 16, 0, 0, MUZZLE_Z + 0.003));   // bore
+  b.add(M.steel, gTube(0.0090, 0.0034, 0.010, 16, 0, 0, MUZZLE_Z + 0.008));
 
-  // Gas block + tube
-  root.add(box(steel, 0.021, 0.024, 0.030, 0, 0.003, -0.318));
-  root.add(cyl(steel, 0.0032, 0.0032, 0.24, 8, 0, 0.0155, -0.20));
+  // Low-profile gas block + gas tube running back to the receiver.
+  b.add(M.steel, gChamfer(0.0215, 0.0225, 0.030, 0, 0.0028, -0.318, 0, 0, 0, 0.0012));
+  b.add(M.bright, gScrew(0.0019, 0.0108, 0.0028, -0.312, 'x'));
+  b.add(M.bright, gScrew(0.0019, 0.0108, 0.0028, -0.324, 'x'));
+  b.add(M.bright, gRod(0.0031, 0.230, 8, 0, 0.0152, -0.200));
 
-  // ------------------------- free-float handguard --------------------------
-  const hgLen = 0.255;
-  const hgZ = -0.215;
-  const hgOuter = 0.0225;
-  const rail = new THREE.Group();
-  // Octagonal shell built from 8 flats — cheaper and crisper than a cylinder
-  // with a normal map at this scale.
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
-    const panel = box(anodized, 0.0176, 0.0045, hgLen,
-      Math.cos(a) * hgOuter, Math.sin(a) * hgOuter, hgZ, 0, 0, a + Math.PI / 2);
-    rail.add(panel);
-    // M-LOK style cut-outs
-    for (let s = 0; s < 4; s++) {
-      const z = hgZ - hgLen / 2 + 0.045 + s * 0.055;
-      rail.add(box(darkPoly, 0.0075, 0.0065, 0.026,
-        Math.cos(a) * (hgOuter - 0.0022), Math.sin(a) * (hgOuter - 0.0022), z, 0, 0, a + Math.PI / 2));
-    }
+  // --------------------------- handguard + rail ----------------------------
+  handguard(b, M, { z0: -0.348, z1: -0.092, r: 0.0238, slots: 4, mat: M.fde });
+  const railTop = picatinny(b, M, { z0: -0.352, z1: 0.052, y: RAIL_Y });
+
+  // Angled foregrip + hand stop on the underside.
+  const fgZ = -0.238;
+  b.add(M.fde, gChamfer(0.0245, 0.060, 0.030, 0, -0.052, fgZ + 0.010, 0.42, 0, 0, 0.0022));
+  b.add(M.rubber, gChamfer(0.0255, 0.038, 0.020, 0, -0.062, fgZ + 0.018, 0.42, 0, 0, 0.0016));
+  b.add(M.alu, gChamfer(0.020, 0.010, 0.026, 0, -0.028, fgZ + 0.004, 0, 0, 0, 0.0010));
+  b.add(M.bright, gScrew(0.0022, 0, -0.0245, fgZ - 0.004, 'y'));
+
+  // Sling QD socket and a short section of webbing stub.
+  b.add(M.alu, gTube(0.0055, 0.0030, 0.006, 12, 0.0232, -0.006, -0.300, 'x'));
+  b.add(M.strap, gChamfer(0.0035, 0.020, 0.024, 0.0272, -0.014, -0.300, 0.2, 0, 0.3, 0.0006));
+
+  // ---------------------------- upper receiver -----------------------------
+  b.add(M.alu, gChamfer(0.0300, 0.0330, 0.176, 0, 0.0092, -0.006, 0, 0, 0, 0.0018));
+  b.add(M.aluMarked, gChamfer(0.0308, 0.0225, 0.120, 0, 0.0060, -0.010, 0, 0, 0, 0.0014));
+  // Forward assist and brass deflector.
+  b.add(M.alu, gRod(0.0056, 0.016, 12, 0.0172, 0.0000, 0.036, 'x'));
+  b.add(M.bright, gRod(0.0040, 0.005, 12, 0.0262, 0.0000, 0.036, 'x'));
+  b.add(M.alu, gChamfer(0.0105, 0.017, 0.026, 0.0168, 0.0105, 0.050, 0, 0, 0, 0.0016));
+
+  // Ejection port: a recess with a hinged dust cover held open.
+  b.add(M.poly, gChamfer(0.0035, 0.0175, 0.046, 0.0152, 0.0060, 0.020, 0, 0, 0, 0.0008));
+  b.add(M.bright, gChamfer(0.0030, 0.0150, 0.042, 0.0176, 0.0180, 0.020, 0.0, 0.0, -0.9, 0.0006));
+  b.add(M.bright, gRod(0.0022, 0.052, 8, 0.0192, -0.0035, 0.020));
+  b.add(M.bright, gSpring(0.0026, 0.010, 5, 6, 0.0192, -0.0035, 0.046));
+  // Bolt face visible through the port.
+  b.add(M.bright, gRod(0.0074, 0.006, 14, 0.0100, 0.0060, 0.030, 'x'));
+
+  // Takedown / pivot pins.
+  b.add(M.bright, gRod(0.0040, 0.031, 12, 0, -0.0090, -0.030, 'x'));
+  b.add(M.bright, gRod(0.0040, 0.031, 12, 0, -0.0090, 0.066, 'x'));
+
+  // Rear backup iron sight, folded flat on the rail.
+  b.add(M.alu, gChamfer(0.0225, 0.0075, 0.026, 0, railTop + 0.0035, 0.030, 0, 0, 0, 0.0008));
+  b.add(M.poly, gChamfer(0.0130, 0.0055, 0.018, 0, railTop + 0.0080, 0.030, 0, 0, 0, 0.0006));
+  // Front sight, also folded.
+  b.add(M.alu, gChamfer(0.0225, 0.0075, 0.022, 0, railTop + 0.0035, -0.330, 0, 0, 0, 0.0008));
+  b.add(M.poly, gChamfer(0.0100, 0.0050, 0.016, 0, railTop + 0.0078, -0.330, 0, 0, 0, 0.0006));
+
+  // ---------------------------- lower receiver -----------------------------
+  b.add(M.alu, gChamfer(0.0268, 0.0300, 0.132, 0, -0.0165, 0.006, 0, 0, 0, 0.0018));
+  // Magwell, flaring outward with a bevelled mouth.
+  b.add(M.alu, gChamfer(0.0300, 0.0225, 0.052, 0, -0.0345, -0.026, 0, 0, 0, 0.0022));
+  b.add(M.poly, gChamfer(0.0250, 0.0090, 0.043, 0, -0.0400, -0.026, 0, 0, 0, 0.0012));
+  // Mag release button and its fence.
+  b.add(M.alu, gRod(0.0052, 0.010, 12, 0.0142, -0.0150, -0.008, 'x'));
+  b.add(M.bright, gRod(0.0036, 0.004, 12, 0.0195, -0.0150, -0.008, 'x'));
+  // Bolt catch on the left.
+  b.add(M.alu, gChamfer(0.0060, 0.0105, 0.036, -0.0150, -0.0130, -0.004, 0, 0, 0, 0.0008));
+  b.add(M.bright, gRod(0.0026, 0.008, 10, -0.0175, -0.0130, 0.010, 'x'));
+
+  // Trigger guard: a proper loop rather than a bar.
+  b.add(M.alu, gChamfer(0.0088, 0.0058, 0.056, 0, -0.0455, 0.0440, 0, 0, 0, 0.0012));
+  b.add(M.alu, gChamfer(0.0088, 0.0260, 0.0068, 0, -0.0340, 0.0182, -0.22, 0, 0, 0.0012));
+  b.add(M.alu, gChamfer(0.0088, 0.0110, 0.0090, 0, -0.0248, 0.0225, -0.55, 0, 0, 0.0010));
+
+  // Safety selector with a detent and the two-position lever.
+  b.add(M.alu, gRod(0.0058, 0.0300, 12, 0, -0.0240, 0.0520, 'x'));
+  b.add(M.alu, gChamfer(0.0190, 0.0062, 0.0110, -0.0210, -0.0270, 0.0470, 0, 0, 0.55, 0.0009));
+  b.add(M.alu, gChamfer(0.0190, 0.0062, 0.0110, 0.0210, -0.0270, 0.0470, 0, 0, -0.55, 0.0009));
+
+  // Pistol grip: polymer core, rubber side panels, palm swell, storage cap.
+  const gripR = 0.30, gx = 0, gy = -0.0715, gz = 0.0660;
+  b.add(M.fde, gChamfer(0.0248, 0.0930, 0.0360, gx, gy, gz, gripR, 0, 0, 0.0030));
+  b.add(M.rubber, gChamfer(0.0272, 0.0640, 0.0230, gx, gy - 0.004, gz - 0.0035, gripR, 0, 0, 0.0022));
+  b.add(M.fde, gChamfer(0.0262, 0.0180, 0.0330, gx, gy + 0.0430, gz - 0.0130, gripR, 0, 0, 0.0022));  // beavertail
+  b.add(M.poly, gChamfer(0.0268, 0.0110, 0.0350, gx, gy - 0.0480, gz + 0.0148, gripR, 0, 0, 0.0024)); // butt cap
+  b.add(M.bright, gScrew(0.0022, gx, gy - 0.0530, gz + 0.0165, 'y'));
+
+  // ------------------------------- buffer ----------------------------------
+  b.add(M.alu, gRod(0.0152, 0.140, 16, 0, 0.0035, 0.145));
+  for (let i = 0; i < 6; i++) {  // castle-nut style notches at the receiver end
+    const a = (i / 6) * TAU;
+    b.add(M.alu, gBox(0.0030, 0.0035, 0.010, Math.cos(a) * 0.0165, 0.0035 + Math.sin(a) * 0.0165, 0.082, 0, 0, a));
   }
-  // Picatinny top rail: repeated cross-slots along the whole receiver+handguard
-  const railTopY = 0.0295;
-  const railStartZ = -0.345;
-  const railEndZ = 0.045;
-  rail.add(box(anodized, 0.021, 0.006, railEndZ - railStartZ, 0, railTopY, (railStartZ + railEndZ) / 2));
-  const nSlots = Math.floor((railEndZ - railStartZ) / 0.0102);
-  for (let i = 0; i < nSlots; i++) {
-    const z = railStartZ + 0.006 + i * 0.0102;
-    rail.add(box(black, 0.0206, 0.0044, 0.0050, 0, railTopY + 0.0030, z));
+  for (let i = 0; i < 6; i++) {  // stock adjustment detent holes underneath
+    b.add(M.poly, gChamfer(0.0060, 0.0035, 0.0060, 0, -0.0115, 0.100 + i * 0.017, 0, 0, 0, 0.0006));
   }
-  root.add(rail);
+  b.add(M.alu, gTube(0.0170, 0.0140, 0.0100, 16, 0, 0.0035, 0.081));
 
-  // -------------------------- upper receiver -------------------------------
-  const upper = box(anodized, 0.0295, 0.032, 0.185, 0, 0.005, -0.045);
-  root.add(upper);
-  // Forward assist + brass deflector
-  root.add(cyl(anodized, 0.0055, 0.0055, 0.016, 10, 0.017, 0.0, 0.010, 'x'));
-  root.add(box(anodized, 0.010, 0.016, 0.026, 0.0165, 0.008, 0.024));
+  b.flush(root, 'carbine');
 
-  // Ejection port (recessed) + dust cover hinge
-  root.add(box(black, 0.004, 0.017, 0.045, 0.0152, 0.004, -0.005));
-  root.add(cyl(steel, 0.0022, 0.0022, 0.050, 8, 0.019, -0.006, -0.005));
-
-  // Charging handle — animated on reload/chamber
+  // --------------------------- animated sub-groups -------------------------
+  // Charging handle (latch + shaft) rides on its own node.
   const charging = new THREE.Group();
   charging.name = 'chargingHandle';
-  charging.add(box(anodized, 0.052, 0.0075, 0.026, 0, 0.0175, 0.060));
-  charging.add(box(anodized, 0.014, 0.010, 0.030, -0.024, 0.0175, 0.058));
+  {
+    const cb = new Batch();
+    cb.add(M.alu, gChamfer(0.0540, 0.0080, 0.0250, 0, 0.0212, 0.0755, 0, 0, 0, 0.0010));
+    cb.add(M.alu, gChamfer(0.0150, 0.0105, 0.0300, -0.0250, 0.0212, 0.0740, 0, 0, 0, 0.0012));
+    cb.add(M.poly, gChamfer(0.0060, 0.0075, 0.0180, -0.0290, 0.0212, 0.0720, 0, 0, 0, 0.0008));
+    cb.add(M.alu, gChamfer(0.0200, 0.0060, 0.0620, 0, 0.0212, 0.0400, 0, 0, 0, 0.0008));
+    cb.add(M.bright, gScrew(0.0018, -0.0200, 0.0252, 0.0755, 'y'));
+    cb.flush(charging, 'ch');
+  }
   root.add(charging);
 
-  // -------------------------- lower receiver -------------------------------
-  const lower = box(anodized, 0.0265, 0.030, 0.130, 0, -0.021, -0.010);
-  root.add(lower);
-  // Magwell flares outward toward the bottom
-  root.add(box(anodized, 0.0285, 0.020, 0.050, 0, -0.040, -0.036));
-
-  // Magazine — curved STANAG suggested with two segments
-  const magGroup = new THREE.Group();
-  magGroup.name = 'magazine';
-  magGroup.add(box(darkPoly, 0.0225, 0.075, 0.040, 0, -0.075, -0.038, 0.10));
-  magGroup.add(box(darkPoly, 0.0225, 0.070, 0.038, 0.0, -0.142, -0.024, 0.24));
-  magGroup.add(box(black, 0.0235, 0.006, 0.042, 0, -0.113, -0.032, 0.10));
-  root.add(magGroup);
-
-  // Trigger guard + trigger
-  root.add(box(anodized, 0.0085, 0.0055, 0.052, 0, -0.049, 0.014));
-  root.add(box(anodized, 0.0085, 0.026, 0.006, 0, -0.036, 0.040));
-  const trigger = box(steel, 0.005, 0.018, 0.007, 0, -0.043, 0.020, -0.15);
+  const trigger = new THREE.Group();
   trigger.name = 'trigger';
+  {
+    const tb = new Batch();
+    tb.add(M.bright, gChamfer(0.0052, 0.0195, 0.0075, 0, -0.0300, 0.0355, 0, 0, 0, 0.0008));
+    tb.add(M.bright, gChamfer(0.0052, 0.0060, 0.0110, 0, -0.0385, 0.0330, -0.30, 0, 0, 0.0008));
+    tb.flush(trigger, 'tr');
+  }
+  trigger.position.set(0, -0.0140, 0.0130);   // pivot
+  trigger.children[0].position.set(0, 0.0140, -0.0130);
   root.add(trigger);
 
-  // Pistol grip, raked back
-  const grip = box(polymer, 0.024, 0.095, 0.036, 0, -0.075, 0.058, 0.30);
-  root.add(grip);
-  root.add(box(darkPoly, 0.026, 0.012, 0.034, 0, -0.118, 0.072, 0.30));
+  const mag = magazine(M, { len: 0.140 });
+  mag.position.set(0, -0.0360, -0.0100);
+  root.add(mag);
 
-  // Safety selector
-  root.add(cyl(steel, 0.006, 0.006, 0.032, 10, 0, -0.030, 0.046, 'x'));
-  root.add(box(steel, 0.020, 0.006, 0.010, -0.021, -0.030, 0.042, 0, 0, 0.6));
-
-  // ------------------------------- stock -----------------------------------
-  root.add(cyl(anodized, 0.0145, 0.0145, 0.135, 14, 0, 0.004, 0.135));
-  const stock = new THREE.Group();
-  stock.name = 'stock';
-  stock.add(box(polymer, 0.030, 0.048, 0.105, 0, 0.002, 0.155));
-  stock.add(box(polymer, 0.034, 0.058, 0.020, 0, -0.004, 0.212));  // butt pad
-  stock.add(box(darkPoly, 0.036, 0.062, 0.008, 0, -0.004, 0.223));
-  stock.add(box(polymer, 0.026, 0.030, 0.060, 0, -0.030, 0.150));  // cheek riser underside
+  const stock = stockAssembly(M, { z0: 0.140, y: 0.0035 });
   root.add(stock);
 
-  // ------------------------------- optic -----------------------------------
-  const optic = new THREE.Group();
-  optic.name = 'optic';
-  const body = cyl(black, 0.0165, 0.0165, 0.088, 20, 0, 0.058, -0.015);
-  optic.add(body);
-  optic.add(cyl(black, 0.0185, 0.0185, 0.008, 20, 0, 0.058, -0.058));
-  optic.add(cyl(black, 0.0185, 0.0185, 0.008, 20, 0, 0.058, 0.028));
-  // Mount
-  optic.add(box(black, 0.024, 0.026, 0.050, 0, 0.040, -0.015));
-  optic.add(box(black, 0.030, 0.008, 0.058, 0, 0.030, -0.015));
-  // Turrets
-  optic.add(cyl(black, 0.0075, 0.0085, 0.014, 12, 0, 0.075, -0.015, 'y'));
-  optic.add(cyl(black, 0.0075, 0.0085, 0.014, 12, 0.017, 0.058, -0.015, 'x'));
-
-  // Lens: dark blue-violet coated glass, and a red dot that only the
-  // reticle material emits so it survives tone mapping as a bright point.
-  const lensMat = new THREE.MeshStandardMaterial({
-    color: 0x0a1420, roughness: 0.05, metalness: 0.9,
-    envMapIntensity: 2.2,
-  });
-  optic.add(cyl(lensMat, 0.0152, 0.0152, 0.002, 24, 0, 0.058, -0.055));
-  optic.add(cyl(lensMat, 0.0152, 0.0152, 0.002, 24, 0, 0.058, 0.025));
-
-  const dotMat = new THREE.MeshBasicMaterial({
-    color: 0xff2a12, transparent: true, opacity: 0.95,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.0016, 12), dotMat);
-  dot.position.set(0, 0.058, -0.052);
-  dot.name = 'reticle';
-  optic.add(dot);
-  const glowMat = dotMat.clone();
-  glowMat.opacity = 0.22;
-  const glow = new THREE.Mesh(new THREE.CircleGeometry(0.005, 16), glowMat);
-  glow.position.set(0, 0.058, -0.0515);
-  optic.add(glow);
-
+  const optic = redDot(M, { y: RAIL_Y + 0.0049 + 0.0245, z: -0.030 });
   root.add(optic);
-
-  // Backup iron sights, folded
-  root.add(box(black, 0.010, 0.014, 0.008, 0, 0.038, -0.300));
-  root.add(box(black, 0.012, 0.012, 0.008, 0, 0.038, 0.030));
-
-  // Sling swivel + vertical grip
-  root.add(cyl(steel, 0.005, 0.005, 0.012, 8, 0.020, -0.008, -0.290, 'x'));
-  const foreGrip = box(polymer, 0.024, 0.062, 0.028, 0, -0.048, -0.212, 0.12);
-  foreGrip.name = 'foregrip';
-  root.add(foreGrip);
 
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
 
-  // Anchors the animation layer needs.
-  root.userData.muzzle = new THREE.Vector3(0, 0, -0.552);
-  root.userData.ejectPort = new THREE.Vector3(0.020, 0.004, -0.005);
-  root.userData.sightHeight = 0.058; // optic centre, used to align ADS
+  root.userData.muzzle = new THREE.Vector3(0, 0, MUZZLE_Z);
+  root.userData.ejectPort = new THREE.Vector3(0.021, 0.006, 0.020);
+  root.userData.sightHeight = optic.userData.sightAxis;
+  root.userData.sightZ = -0.030;
   root.userData.parts = {
-    charging,
-    magazine: magGroup,
-    stock,
-    optic,
-    trigger,
-    foregrip: foreGrip,
+    charging, magazine: mag, stock, optic, trigger,
+    reticle: optic.userData.reticle,
+    dotMat: optic.userData.dotMat,
+    haloMat: optic.userData.haloMat,
   };
-
+  // Where the hands go. Solved once here so Hands.js stays weapon-agnostic.
+  root.userData.grips = {
+    trigger: { pos: new THREE.Vector3(0.0, -0.0580, 0.0620), rake: gripR, radius: 0.0135 },
+    support: { pos: new THREE.Vector3(0.0, 0.0000, -0.2320), rake: 0.10, radius: 0.0245 },
+    magwell: new THREE.Vector3(0.0, -0.055, -0.026),
+    charging: new THREE.Vector3(-0.030, 0.0212, 0.0740),
+  };
   return root;
 }
+
+// -------------------------------- the PDW -----------------------------------
+
+/** Compact 9 mm PDW: proves the kit, the hands and the anim layer generalise. */
+export function buildPDW() {
+  const M = gunMaterials();
+  const root = new THREE.Group();
+  root.name = 'PDW';
+  const b = new Batch();
+
+  const RAIL_Y = 0.0250;
+  const MUZZLE_Z = -0.372;
+
+  // Barrel + compensator
+  b.add(M.steel, gRod(0.0088, 0.120, 16, 0, 0, -0.290));
+  b.add(M.steel, gRod(0.0135, 0.046, 14, 0, 0, MUZZLE_Z + 0.024));
+  for (let i = 0; i < 4; i++) {
+    b.add(M.poly, gBox(0.0055, 0.0110, 0.0055, 0, 0.0092, MUZZLE_Z + 0.010 + i * 0.010));
+  }
+  b.add(M.poly, gTube(0.0122, 0.0050, 0.004, 16, 0, 0, MUZZLE_Z + 0.003));
+
+  // Slim polymer handguard with a top rail
+  handguard(b, M, { z0: -0.300, z1: -0.098, r: 0.0212, slots: 3, mat: M.poly });
+  const railTop = picatinny(b, M, { z0: -0.306, z1: 0.040, y: RAIL_Y });
+
+  // Monolithic upper: a squarer, more modern receiver than the carbine.
+  b.add(M.alu, gChamfer(0.0330, 0.0360, 0.170, 0, 0.0060, -0.010, 0, 0, 0, 0.0022));
+  b.add(M.aluMarked, gChamfer(0.0338, 0.0200, 0.110, 0, 0.0040, -0.012, 0, 0, 0, 0.0014));
+  b.add(M.poly, gChamfer(0.0040, 0.0170, 0.040, 0.0170, 0.0060, 0.024, 0, 0, 0, 0.0008));
+  b.add(M.bright, gRod(0.0072, 0.006, 14, 0.0120, 0.0060, 0.030, 'x'));
+
+  // Lower with an integral magwell in the grip (9 mm layout)
+  b.add(M.poly, gChamfer(0.0300, 0.0290, 0.120, 0, -0.0190, 0.010, 0, 0, 0, 0.0022));
+  b.add(M.poly, gChamfer(0.0310, 0.0980, 0.0420, 0, -0.0790, 0.0470, 0.16, 0, 0, 0.0030));
+  b.add(M.rubber, gChamfer(0.0330, 0.0620, 0.0250, 0, -0.0820, 0.0330, 0.16, 0, 0, 0.0022));
+  b.add(M.poly, gChamfer(0.0330, 0.0130, 0.0450, 0, -0.0330, 0.0430, 0.16, 0, 0, 0.0026));
+  b.add(M.alu, gChamfer(0.0092, 0.0058, 0.036, 0, -0.0470, 0.0080, 0, 0, 0, 0.0012));
+  b.add(M.alu, gChamfer(0.0092, 0.0250, 0.0062, 0, -0.0350, -0.0080, -0.16, 0, 0, 0.0012));
+
+  // Folding stock
+  b.add(M.alu, gChamfer(0.0180, 0.0180, 0.070, 0, 0.0060, 0.115, 0, 0, 0, 0.0016));
+  b.add(M.poly, gChamfer(0.0400, 0.0480, 0.060, 0, 0.0020, 0.170, 0, 0, 0, 0.0026));
+  b.add(M.rubber, gChamfer(0.0420, 0.0580, 0.014, 0, 0.0000, 0.204, -0.08, 0, 0, 0.0028));
+
+  b.flush(root, 'pdw');
+
+  const charging = new THREE.Group();
+  charging.name = 'chargingHandle';
+  {
+    const cb = new Batch();
+    cb.add(M.alu, gChamfer(0.0120, 0.0090, 0.0280, -0.0195, 0.0180, 0.0300, 0, 0, 0, 0.0010));
+    cb.add(M.alu, gChamfer(0.0250, 0.0060, 0.0140, -0.0110, 0.0180, 0.0300, 0, 0, 0, 0.0008));
+    cb.flush(charging, 'ch');
+  }
+  root.add(charging);
+
+  const trigger = new THREE.Group();
+  trigger.name = 'trigger';
+  {
+    const tb = new Batch();
+    tb.add(M.bright, gChamfer(0.0052, 0.0185, 0.0075, 0, -0.0110, -0.0035, 0, 0, 0, 0.0008));
+    tb.flush(trigger, 'tr');
+  }
+  trigger.position.set(0, -0.0260, 0.0165);
+  root.add(trigger);
+
+  const mag = magazine(M, { curve: 0.02, len: 0.115, w: 0.0192, d: 0.030 });
+  mag.position.set(0, -0.0230, 0.0470);
+  mag.rotation.x = 0.16;
+  root.add(mag);
+
+  const optic = redDot(M, { y: RAIL_Y + 0.0049 + 0.0225, z: -0.040, tube: 0.0148 });
+  root.add(optic);
+
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+
+  root.userData.muzzle = new THREE.Vector3(0, 0, MUZZLE_Z);
+  root.userData.ejectPort = new THREE.Vector3(0.021, 0.006, 0.024);
+  root.userData.sightHeight = optic.userData.sightAxis;
+  root.userData.sightZ = -0.040;
+  root.userData.parts = {
+    charging, magazine: mag, stock: null, optic, trigger,
+    reticle: optic.userData.reticle,
+    dotMat: optic.userData.dotMat,
+    haloMat: optic.userData.haloMat,
+  };
+  root.userData.grips = {
+    trigger: { pos: new THREE.Vector3(0.0, -0.0620, 0.0450), rake: 0.16, radius: 0.0155 },
+    support: { pos: new THREE.Vector3(0.0, 0.0000, -0.2000), rake: 0.08, radius: 0.0215 },
+    magwell: new THREE.Vector3(0.0, -0.045, 0.047),
+    charging: new THREE.Vector3(-0.024, 0.0180, 0.0300),
+  };
+  return root;
+}
+
+export const WEAPON_BUILDERS = {
+  carbine: buildCarbine,
+  pdw: buildPDW,
+};

@@ -4,9 +4,9 @@ self.onmessage = (e) => {
   const { id, name, size, seed, opts } = e.data;
   try {
     const r = generateSurface(name, size, seed, opts || {});
-    const transfer = [r.rgb.buffer, r.normal.buffer, r.rough.buffer, r.ao.buffer];
-    if (r.metal) transfer.push(r.metal.buffer);
-    self.postMessage({ id, ok: true, result: r }, transfer);
+    // Albedo, tangent-space normal, and packed ORM — three buffers, all
+    // transferred rather than copied so a 2048² set costs nothing to hand back.
+    self.postMessage({ id, ok: true, result: r }, [r.rgb.buffer, r.normal.buffer, r.orm.buffer]);
   } catch (err) {
     self.postMessage({ id, ok: false, error: String(err && err.message || err) });
   }

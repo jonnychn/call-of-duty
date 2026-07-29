@@ -82,13 +82,21 @@ export class MaterialLibrary {
     if (this._tileCache.has(cacheKey)) return this._tileCache.get(cacheKey);
 
     const mat = base.clone();
-    // clone() shares texture objects; we need per-repeat copies of each map.
+    // clone() shares texture objects, so each repeat needs its own Texture
+    // view over the same image. Clone once per *distinct* source texture —
+    // ao/roughness/metalness all reference the one packed ORM map, and giving
+    // them separate clones would triple the sampler count for nothing.
+    const clones = new Map();
     for (const slot of ['map', 'normalMap', 'roughnessMap', 'aoMap', 'metalnessMap']) {
       const t = base[slot];
       if (!t) continue;
-      const c = t.clone();
-      c.repeat.set(rx, ry);
-      c.needsUpdate = true;
+      let c = clones.get(t);
+      if (!c) {
+        c = t.clone();
+        c.repeat.set(rx, ry);
+        c.needsUpdate = true;
+        clones.set(t, c);
+      }
       mat[slot] = c;
     }
     mat.needsUpdate = true;

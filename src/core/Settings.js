@@ -13,6 +13,8 @@ const PRESETS = {
     pixelRatio: 0.75,
     shadowMapSize: 1024,
     cascades: 2,
+    csm: false,
+    softShadows: 0,
     shadowDistance: 40,
     ssao: false,
     ssaoSamples: 8,
@@ -22,6 +24,8 @@ const PRESETS = {
     dof: false,
     volumetrics: false,
     volumetricSteps: 0,
+    aerialPerspective: true,
+    autoExposure: false,
     taa: false,
     ssr: false,
     textureSize: 512,
@@ -33,6 +37,8 @@ const PRESETS = {
     pixelRatio: 1.0,
     shadowMapSize: 2048,
     cascades: 3,
+    csm: true,
+    softShadows: 0,
     shadowDistance: 70,
     ssao: true,
     ssaoSamples: 12,
@@ -42,6 +48,8 @@ const PRESETS = {
     dof: true,
     volumetrics: true,
     volumetricSteps: 24,
+    aerialPerspective: true,
+    autoExposure: true,
     taa: true,
     ssr: false,
     textureSize: 1024,
@@ -53,6 +61,8 @@ const PRESETS = {
     pixelRatio: 1.0,
     shadowMapSize: 2048,
     cascades: 4,
+    csm: true,
+    softShadows: 1,
     shadowDistance: 110,
     ssao: true,
     ssaoSamples: 20,
@@ -62,6 +72,8 @@ const PRESETS = {
     dof: true,
     volumetrics: true,
     volumetricSteps: 40,
+    aerialPerspective: true,
+    autoExposure: true,
     taa: true,
     ssr: true,
     textureSize: 2048,
@@ -73,7 +85,9 @@ const PRESETS = {
     pixelRatio: 1.0,
     shadowMapSize: 4096,
     cascades: 4,
-    shadowDistance: 160,
+    csm: true,
+    softShadows: 1,
+    shadowDistance: 170,
     ssao: true,
     ssaoSamples: 32,
     bloom: true,
@@ -82,6 +96,8 @@ const PRESETS = {
     dof: true,
     volumetrics: true,
     volumetricSteps: 64,
+    aerialPerspective: true,
+    autoExposure: true,
     taa: true,
     ssr: true,
     textureSize: 2048,
@@ -103,15 +119,41 @@ export const settings = {
   invertY: false,
 
   // Post-process artistic controls
-  exposure: 0.52,
-  bloomStrength: 0.42,
-  bloomThreshold: 0.9,
-  chromaticAberration: 0.0016,
-  filmGrain: 0.030,
-  vignette: 0.34,
-  sharpen: 0.35,
-  lensDirt: 0.35,
+  // `exposure` is a global stop offset on top of the per-time-of-day exposure
+  // the Atmosphere publishes. 1.0 = shoot the preset as authored.
+  exposure: 1.0,
+  bloomStrength: 0.34,
+  bloomThreshold: 1.05,
+  chromaticAberration: 0.0009,
+  filmGrain: 0.026,
+  vignette: 0.42,
+  sharpen: 0.30,
+  lensDirt: 0.22,
   motionBlurStrength: 0.55,
+
+  // Filmic tone curve (Hable). Higher shoulder = softer highlight rolloff,
+  // higher toe = deeper, more contrasty blacks. These are the knobs that
+  // decide whether the frame reads as "video" or as "film".
+  tone: {
+    shoulderStrength: 0.24,
+    linearStrength: 0.28,
+    linearAngle: 0.12,
+    toeStrength: 0.28,
+    toeNumerator: 0.012,
+    toeDenominator: 0.26,
+    whitePoint: 9.5,
+    contrast: 1.0,       // global multiplier on the per-preset contrast
+    highlightDesat: 0.55, // how much the shoulder pushes toward white
+  },
+
+  // Eye adaptation. Deliberately narrow — this is a stabiliser, not an
+  // auto-exposure that overrides the art direction.
+  exposureAdaptSpeed: 1.6,
+  exposureAdaptMin: -0.55, // stops
+  exposureAdaptMax: 0.55,
+
+  godrayStrength: 1.0,
+  flareStrength: 1.0,
 
   audioMaster: 0.8,
 
