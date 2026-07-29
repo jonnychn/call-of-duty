@@ -172,7 +172,7 @@ export function patchSky(material) {
         float cov = smoothstep( thr, thr + 0.24, n );
         // The projection stretches to infinity at the horizon; fade there or
         // the deck turns into a hard grey band.
-        cov *= smoothstep( 0.015, 0.16, direction.y );
+        cov *= smoothstep( 0.0, 0.055, direction.y );
 
         // Fake self-shadowing: sample the same field a step toward the sun
         // and compare. Cheap, and it puts the light on the correct side.
@@ -191,7 +191,13 @@ export function patchSky(material) {
         vec2 huv = base * cloudScale * 0.34 + vec2( cloudTime * 0.35, -cloudTime * 0.12 );
         float hn = skyFbm( huv * vec2( 1.0, 3.1 ), 4 );
         float hcov = smoothstep( 0.52, 0.78, hn ) * cloudHigh;
-        hcov *= smoothstep( 0.02, 0.22, direction.y );
+        hcov *= smoothstep( 0.01, 0.09, direction.y );
+
+        // Near the horizon the deck is seen edge-on through far more air, so
+        // it loses contrast and takes the haze colour. Without this the
+        // clouds terminate in a hard band and the sky reads as a backdrop.
+        float horizonMix = 1.0 - smoothstep( 0.03, 0.30, direction.y );
+        cCol = mix( cCol, mix( cCol, retColor, 0.72 ), horizonMix );
 
         retColor = mix( retColor, cCol, clamp( cov * cloudDensity, 0.0, 1.0 ) );
         retColor = mix( retColor, cloudColor * 1.05, clamp( hcov * cloudDensity, 0.0, 0.85 ) );

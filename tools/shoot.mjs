@@ -133,6 +133,60 @@ async function acquireLock() {
   }
 }
 
+/**
+ * Captures one frame.
+ *
+ * Neither `page.screenshot()` nor `canvas.toDataURL()` is trustworthy here.
+ * SwiftShader takes about a second per frame, and the headless compositor
+ * hands back partially-rasterised tiles — that is the source of every
+ * "left edge is correct, rest of the frame is black" image, which reads as a
+ * catastrophic lighting bug and is purely a capture artefact. It also poisons
+ * any luminance measured from the result.
+ *
+ * So: stop the render loop, drive frames by hand, and read the default
+ * framebuffer with raw `gl.readPixels` in the same task as the final draw.
+ * The HUD is a DOM overlay and is therefore absent from these captures, which
+ * is what you want when judging lighting; pass `--dom` for a screenshot that
+ * includes it (and accept the tearing).
+ */
+async function capture(page, file, pose) {
+  if (args.dom) {
+    await page.screenshot({ path: file, timeout: SHOT_TIMEOUT });
+    return;
+  }
+  const dataUrl = await page.evaluate(async (frames) => {
+    const e = window.__engine;
+    e.stop();
+    for (let i = 0; i < frames; i++) {
+      e.tick();
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    e.tick();
+
+    const gl = e.renderer.getContext();
+    const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    const px = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+    // readPixels is bottom-up; flip into an ImageData and force alpha opaque.
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    const id = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      id.data.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+    }
+    for (let i = 3; i < id.data.length; i += 4) id.data[i] = 255;
+    ctx.putImageData(id, 0, 0);
+    return cv.toDataURL('image/png');
+  }, pose.ads ? 26 : 18);
+
+  await writeFile(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+  // The loop was stopped for the capture; restart it for the next pose.
+  await page.evaluate(() => window.__engine.start());
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
   const releaseLock = await acquireLock();
@@ -196,9 +250,7 @@ async function main() {
     await page.waitForTimeout(pose.ads ? 2500 : 1200);
 
     const file = path.join(OUT, `${name}.png`);
-    // SwiftShader renders the full post chain at well under 1fps, so a frame
-    // can take far longer than Playwright's 30s default.
-    await page.screenshot({ path: file, timeout: SHOT_TIMEOUT });
+    await capture(page, file, pose);
     written.push(file);
     console.log('wrote', file);
   }

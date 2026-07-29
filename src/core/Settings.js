@@ -125,7 +125,7 @@ export const settings = {
   bloomStrength: 0.34,
   bloomThreshold: 1.05,
   chromaticAberration: 0.0009,
-  filmGrain: 0.026,
+  filmGrain: 0.017,
   vignette: 0.42,
   sharpen: 0.30,
   lensDirt: 0.22,
