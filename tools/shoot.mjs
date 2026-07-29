@@ -28,6 +28,7 @@ const HEIGHT = parseInt(args.height || '1080', 10);
 const QUALITY = args.quality || 'high';
 const TOD = args.tod || 'afternoon';
 const TIMEOUT = parseInt(args.timeout || '180000', 10);
+const SHOT_TIMEOUT = parseInt(args.shotTimeout || '180000', 10);
 
 /**
  * Fixed camera poses. Each is [x, y, z, yawDeg, pitchDeg] plus an optional
@@ -113,18 +114,24 @@ async function main() {
 
     await page.evaluate((p) => {
       const e = window.__engine;
+      e.debug.peaceful = true;      // no AI, no damage wash over the art
+      e.debug.forceAds = !!p.ads;   // the controller owns ads; ask for it properly
       e.player.teleport(p.pos[0], p.pos[1] - 1.59, p.pos[2]);
       e.player.yaw = p.yaw * Math.PI / 180;
       e.player.pitch = p.pitch * Math.PI / 180;
-      e.player.ads = p.ads ? 1 : 0;
       e.player.velocity.set(0, 0, 0);
+      e.hud?.setHealth(100);
     }, pose);
 
-    // Let TAA/AO/exposure settle and shadows re-fit to the new position.
-    await page.waitForTimeout(700);
+    // Let the ADS blend, exposure adaptation, and shadow re-fit settle. This
+    // is wall-clock, and SwiftShader runs at well under 1fps, so it is far
+    // more frames than it looks.
+    await page.waitForTimeout(pose.ads ? 2500 : 1200);
 
     const file = path.join(OUT, `${name}.png`);
-    await page.screenshot({ path: file });
+    // SwiftShader renders the full post chain at well under 1fps, so a frame
+    // can take far longer than Playwright's 30s default.
+    await page.screenshot({ path: file, timeout: SHOT_TIMEOUT });
     written.push(file);
     console.log('wrote', file);
   }

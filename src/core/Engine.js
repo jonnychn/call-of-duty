@@ -46,6 +46,10 @@ export class Engine {
     this.input = new Input(canvas);
     this.materials = new MaterialLibrary();
 
+    // Overrides the screenshot harness drives so review frames are
+    // reproducible: hold ADS without a mouse, and suppress combat state.
+    this.debug = { forceAds: false, peaceful: false };
+
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
     this._unsubSettings = onSettingsChange(() => this.applySettings());
@@ -208,10 +212,17 @@ export class Engine {
       sprint: i.down('ShiftLeft') || i.down('ShiftRight'),
       tacSprint: i.down('ShiftLeft') && i.pressed('KeyW'),
       crouch: i.down('ControlLeft') || i.down('KeyC'),
-      ads: i.mouseDown(2),
+      ads: i.mouseDown(2) || this.debug.forceAds,
       leanLeft: i.down('KeyQ'),
       leanRight: i.down('KeyE'),
     };
+
+    // Review mode: the screenshot harness needs a frame that shows the art,
+    // not one mid-firefight with a red damage wash over it.
+    if (this.debug.peaceful) {
+      this.hud?.setHealth(100);
+      if (this.hud) this.hud.damageFlash = 0;
+    }
 
     this.player.update(dt, cmd);
     this.weapons.update(dt, {
@@ -225,7 +236,7 @@ export class Engine {
       firing: i.mouseDown(0) && this.weapons.canFire(),
     });
 
-    this.ai.update(dt);
+    if (!this.debug.peaceful) this.ai.update(dt);
     this.fx.update(dt, this.camera);
     this.atmosphere.update(this.camera);
     this._footsteps(dt);

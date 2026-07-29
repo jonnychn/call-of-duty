@@ -102,20 +102,23 @@ export class Viewmodel {
     // Key from upper-left-front (the "sun over your shoulder" convention),
     // cool bounce from below-right, and two rims that trace the top edge and
     // the underside so the silhouette separates from any background.
-    this.key = new THREE.DirectionalLight(0xfff2e2, 4.2);
+    this.key = new THREE.DirectionalLight(0xfff2e2, 2.1);
     this.key.position.set(-0.75, 1.05, 0.35);
 
-    this.fill = new THREE.DirectionalLight(0x8fb2e6, 1.5);
+    this.fill = new THREE.DirectionalLight(0x8fb2e6, 0.8);
     this.fill.position.set(1.0, -0.55, 0.45);
 
-    this.rim = new THREE.DirectionalLight(0xffe0bc, 5.0);
+    this.rim = new THREE.DirectionalLight(0xffe0bc, 1.9);
     this.rim.position.set(0.55, 0.85, -1.25);
 
-    this.rimLow = new THREE.DirectionalLight(0x9fc4ff, 2.2);
+    this.rimLow = new THREE.DirectionalLight(0x9fc4ff, 0.9);
     this.rimLow.position.set(-0.85, -0.70, -0.95);
 
+    // Levels are deliberately conservative: this rig predates the filmic
+    // tonemap, and at its original intensities the receiver clipped to flat
+    // white and the metal broke into specular speckle at grazing angles.
     // A very soft ambient so the deepest recesses do not crush to pure black.
-    this.ambient = new THREE.HemisphereLight(0xa8c4e8, 0x4a4034, 0.55);
+    this.ambient = new THREE.HemisphereLight(0xa8c4e8, 0x4a4034, 0.40);
 
     // Kicks with the muzzle flash: FX drives the real flash light, this one
     // just lifts the receiver and the hands for a frame or two.
@@ -148,7 +151,7 @@ export class Viewmodel {
     this.scene.environment = envTexture;
     // The gun is metal: the probe is doing most of the work on the receiver
     // and the optic glass, so it runs much hotter here than in the world.
-    this.scene.environmentIntensity = 1.25;
+    this.scene.environmentIntensity = 0.65;
   }
 
   setSize(w, h) {

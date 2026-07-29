@@ -71,8 +71,11 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   const len = 0.084;
   // Body: tube plus the boss for the turrets and the battery cap.
   b.add(M.opticBody, gTube(tube, tube - 0.0026, len, 24, 0, y, z));
-  b.add(M.opticBody, gRod(tube + 0.0028, 0.0075, 24, 0, y, z - len / 2 + 0.004));
-  b.add(M.opticBody, gRod(tube + 0.0028, 0.0075, 24, 0, y, z + len / 2 - 0.004));
+  // The end bells must be rings, not discs. gRod lathes from radius 0, so
+  // using it here plugs both ends of the sight and the player aims at an
+  // opaque black disc — the one thing a red dot must never be.
+  b.add(M.opticBody, gTube(tube + 0.0028, tube - 0.0026, 0.0075, 24, 0, y, z - len / 2 + 0.004));
+  b.add(M.opticBody, gTube(tube + 0.0028, tube - 0.0026, 0.0075, 24, 0, y, z + len / 2 - 0.004));
   b.add(M.opticBody, gChamfer(0.0235, 0.0165, 0.030, 0, y - 0.0035, z + 0.004, 0, 0, 0, 0.0012));
   // Turrets: elevation on top, windage on the right, both capped and knurled.
   for (const [ax, px, py] of [['y', 0, y + tube + 0.004], ['x', tube + 0.004, y]]) {
