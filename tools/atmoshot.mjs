@@ -37,6 +37,9 @@ const POSES = {
   shadowCheck: { pos: [6, 1.6, 26], yaw: 250, pitch: -14 },
   awaySun:     { pos: [0, 1.6, 20], yaw: 56, pitch: 0 },
   skyline:     { pos: [10, 1.6, 50], yaw: 200, pitch: 12 },
+  wpnSky:      { pos: [0, 1.6, 44], yaw: 178, pitch: 26 },
+  skyLow:      { pos: [0, 1.6, 44], yaw: 178, pitch: 6 },
+  skyUp:       { pos: [0, 1.6, 44], yaw: 90, pitch: 34 },
 };
 
 async function main() {

@@ -659,7 +659,11 @@ const TonemapShader = {
 
       // Lateral chromatic aberration grows toward the frame edge, zero in the
       // centre so the crosshair stays crisp.
-      float ca = aberration * ( 0.25 + r2 * 3.0 );
+      // Pure edge-weighted: zero through the middle third of the frame, where
+      // the weapon and the crosshair live, then ramping steeply. The old
+      // version had a constant floor that split high-contrast verticals on the
+      // gun rail right in the centre of frame.
+      float ca = aberration * pow( r2 * 2.0, 1.7 ) * 3.0;
       vec2 dir = normalize( centred + 1e-6 );
       vec3 col;
       col.r = texture2D( tDiffuse, uv - dir * ca ).r;
@@ -744,7 +748,7 @@ const TonemapShader = {
           luma( texture2D( tDiffuse, uv + vec2( 0.0,  px.y ) ).rgb ) +
           luma( texture2D( tDiffuse, uv + vec2( 0.0, -px.y ) ).rgb ) );
         float d = ( l0 - lb ) / max( l0 + lb, 1e-3 );
-        col *= 1.0 + clamp( d, -0.5, 0.5 ) * sharpen * 1.3;
+        col *= 1.0 + clamp( d, -0.30, 0.30 ) * sharpen * 1.1;
       }
 
       col += vec3( 1.0, 0.92, 0.78 ) * flash;
@@ -842,10 +846,13 @@ export class PostFX {
     this.gtao = new GTAOPass(scene, camera, size.x, size.y);
     this.gtao.output = GTAOPass.OUTPUT.Default;
     this.gtao.updateGtaoMaterial({
-      radius: 0.5,
-      distanceExponent: 1.4,
-      thickness: 1.0,
-      scale: 1.35,
+      // A 0.5 m radius only finds crevices. Large-scale occlusion — under
+      // balconies, inside the arch, where a wall meets the road — is what
+      // grounds the set, and that needs metres.
+      radius: 1.25,
+      distanceExponent: 1.6,
+      thickness: 1.4,
+      scale: 1.7,
       samples: Math.max(8, Math.round(settings.ssaoSamples / 2)),
       distanceFallOff: 1.0,
       screenSpaceRadius: false,

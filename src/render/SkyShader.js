@@ -36,6 +36,10 @@ export function patchSky(material) {
   u.cloudColor = { value: new THREE.Color(0xffffff) };
   u.cloudShadow = { value: new THREE.Color(0x8a94a6) };
   u.cloudTime = { value: 0.0 };
+  u.cloudHeight = { value: 1900.0 };   // cumulus deck altitude, metres
+  u.cirrusHeight = { value: 7200.0 };
+  u.hazeColor = { value: new THREE.Color(0xb9c3cf) };
+  u.hazeStrength = { value: 0.55 };
 
   let fs = material.fragmentShader;
 
@@ -59,6 +63,10 @@ export function patchSky(material) {
     uniform vec3 cloudColor;
     uniform vec3 cloudShadow;
     uniform float cloudTime;
+    uniform float cloudHeight;
+    uniform float cirrusHeight;
+    uniform vec3 hazeColor;
+    uniform float hazeStrength;
 
     float skyHash( vec3 p ) {
       p = fract( p * 0.3183099 + vec3( 0.71, 0.113, 0.419 ) );
@@ -98,6 +106,18 @@ export function patchSky(material) {
       float c = skyHash( vec3( i + vec2( 0.0, 1.0 ), 0.0 ) );
       float d = skyHash( vec3( i + vec2( 1.0, 1.0 ), 0.0 ) );
       return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
+    }
+
+    // Distance from the eye to a cloud shell at height h above a planet of
+    // radius R. A flat plane divided by direction.y blows up at the horizon,
+    // which is exactly why the old deck had to be faded out below ~9 degrees
+    // and therefore never existed at the elevations a player actually looks
+    // at. A shell stays finite: the far distance tends to sqrt(2Rh), so
+    // features converge toward the horizon instead of shearing to infinity.
+    float skyShellDist( vec3 d, float h ) {
+      const float R = 6371000.0;
+      float b = R * d.y;
+      return sqrt( max( b * b + 2.0 * R * h + h * h, 0.0 ) ) - b;
     }
 
     float skyFbm( vec2 p, const int oct ) {
@@ -160,47 +180,74 @@ export function patchSky(material) {
     /* glsl */`
       retColor *= skyExposure;
 
-      if ( cloudDensity > 0.001 && direction.y > 0.002 ) {
-        float cy = max( direction.y, 0.006 );
-        vec2 base = direction.xz / cy;
+      if ( cloudDensity > 0.001 && direction.y > -0.02 ) {
+        vec3 vd = normalize( direction );
+        float dUp = max( vd.y, 0.0006 );
 
-        // --- low deck ---
-        vec2 cuv = base * cloudScale + vec2( cloudTime * 0.9, cloudTime * 0.35 );
-        vec2 warp = vec2( skyFbm( cuv * 0.45, 2 ), skyFbm( cuv * 0.45 + 9.1, 2 ) ) - 0.5;
-        float n = skyFbm( cuv + warp * 1.6, 4 );
+        // ---- cumulus deck ----
+        float tLow = skyShellDist( vec3( vd.x, dUp, vd.z ), cloudHeight );
+        // 2.4 km features at cloudScale 1.0.
+        float sLow = 0.00042 * cloudScale;
+        vec2 cuv = tLow * vd.xz * sLow + vec2( cloudTime * 0.9, cloudTime * 0.35 );
+
+        vec2 warp = vec2( skyFbm( cuv * 0.42, 2 ), skyFbm( cuv * 0.42 + 9.1, 2 ) ) - 0.5;
+        vec2 wuv = cuv + warp * 1.7;
+        float n = skyFbm( wuv, 5 );
+
         float thr = 1.0 - cloudCoverage;
-        float cov = smoothstep( thr, thr + 0.24, n );
-        // The projection stretches to infinity at the horizon; fade there or
-        // the deck turns into a hard grey band.
-        cov *= smoothstep( 0.0, 0.055, direction.y );
+        float cov = smoothstep( thr, thr + 0.11, n );
 
-        // Fake self-shadowing: sample the same field a step toward the sun
-        // and compare. Cheap, and it puts the light on the correct side.
-        vec2 sunStep = normalize( vSunDirection.xz + vec2( 1e-4 ) ) * 0.55;
-        float nSun = skyFbm( cuv + warp * 1.6 + sunStep, 4 );
-        float lit = clamp( ( n - nSun ) * 3.2 + 0.5, 0.0, 1.0 );
-        // Thin edges transmit light: bright rims where the deck breaks up.
-        float edge = 1.0 - smoothstep( 0.0, 0.55, cov );
+        // Fade with distance, not with elevation: past ~70 km the deck is
+        // simply part of the haze, which is what it looks like in reality.
+        float far = 1.0 - smoothstep( 22000.0, 90000.0, tLow );
+        cov *= far;
 
-        vec3 cCol = mix( cloudShadow, cloudColor, lit );
-        cCol += cloudColor * edge * 0.35;
-        // Silver lining / forward scatter through the cloud toward the sun.
-        cCol += cloudColor * pow( max( cosTheta, 0.0 ), 6.0 ) * ( 0.35 + 0.9 * edge );
+        // Form. Two extra taps give a usable gradient: one toward the sun for
+        // the light/shade split, one "up-sun" for the bright transmitting rim.
+        vec2 sunStep = normalize( vSunDirection.xz + vec2( 1e-4 ) );
+        float nSun  = skyFbm( wuv + sunStep * 0.62, 4 );
+        float nSun2 = skyFbm( wuv + sunStep * 1.35, 4 );
+        // Optical depth toward the light: how much cloud is between this point
+        // and the sun. More cloud in the way -> deeper shade.
+        float depth = clamp( ( nSun - n ) * 2.0 + ( nSun2 - n ) * 1.1, -1.0, 1.0 );
+        float lit = clamp( 0.5 - depth * 3.2, 0.0, 1.0 );
+        // Push the midtones apart so there is a definite sunlit side and a
+        // definite shaded side rather than one grey mass.
+        lit = smoothstep( 0.12, 0.88, lit );
 
-        // --- high cirrus ---
-        vec2 huv = base * cloudScale * 0.34 + vec2( cloudTime * 0.35, -cloudTime * 0.12 );
-        float hn = skyFbm( huv * vec2( 1.0, 3.1 ), 4 );
-        float hcov = smoothstep( 0.52, 0.78, hn ) * cloudHigh;
-        hcov *= smoothstep( 0.01, 0.09, direction.y );
+        // Thin edges transmit; thick cores do not.
+        float thin = 1.0 - smoothstep( 0.05, 0.62, cov );
+        // Base shading is darker underneath, which is what sells volume from
+        // below — we are always looking at the base of a cumulus deck.
+        float baseShade = mix( 0.34, 1.0, smoothstep( 0.02, 0.50, vd.y ) );
 
-        // Near the horizon the deck is seen edge-on through far more air, so
-        // it loses contrast and takes the haze colour. Without this the
-        // clouds terminate in a hard band and the sky reads as a backdrop.
-        float horizonMix = 1.0 - smoothstep( 0.03, 0.30, direction.y );
-        cCol = mix( cCol, mix( cCol, retColor, 0.72 ), horizonMix );
+        vec3 cCol = mix( cloudShadow, cloudColor * 1.25, lit );
+        cCol *= baseShade;
+        cCol += cloudColor * thin * 0.55;                                  // translucent edge
+        cCol += cloudColor * pow( max( cosTheta, 0.0 ), 5.0 ) * ( 0.30 + 1.1 * thin ); // silver lining
 
+        // ---- cirrus sheet ----
+        float tHigh = skyShellDist( vec3( vd.x, dUp, vd.z ), cirrusHeight );
+        vec2 huv = tHigh * vd.xz * ( sLow * 0.30 ) + vec2( cloudTime * 0.4, -cloudTime * 0.14 );
+        float hn = skyFbm( huv * vec2( 1.0, 3.4 ) + skyFbm( huv * 0.7, 2 ) * 0.8, 4 );
+        float hcov = smoothstep( 0.50, 0.80, hn ) * cloudHigh;
+        hcov *= 1.0 - smoothstep( 40000.0, 160000.0, tHigh );
+
+        retColor = mix( retColor, cloudColor * 1.02, clamp( hcov * cloudDensity, 0.0, 0.8 ) );
         retColor = mix( retColor, cCol, clamp( cov * cloudDensity, 0.0, 1.0 ) );
-        retColor = mix( retColor, cloudColor * 1.05, clamp( hcov * cloudDensity, 0.0, 0.85 ) );
+      }
+
+      // ---- horizon haze layering -----------------------------------------
+      // Two bands rather than one ramp: a broad aerosol layer through the
+      // lower sky, and a tight, brighter one sitting on the horizon line.
+      // A single gradient reads as a backdrop; two depths read as air.
+      if ( hazeStrength > 0.001 ) {
+        float up = max( direction.y, -0.05 );
+        float broad = pow( 1.0 - clamp( up, 0.0, 1.0 ), 3.2 );
+        float band  = exp( -max( up, 0.0 ) * 42.0 );
+        vec3 hz = hazeColor * ( 0.85 + 0.5 * pow( max( cosTheta, 0.0 ), 3.0 ) );
+        retColor = mix( retColor, hz, clamp( broad * hazeStrength * 0.80, 0.0, 0.92 ) );
+        retColor = mix( retColor, hz * 1.10, clamp( band * hazeStrength * 0.55, 0.0, 0.85 ) );
       }
 
       if ( starIntensity > 0.0 ) {

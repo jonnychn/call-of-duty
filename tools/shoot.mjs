@@ -3,6 +3,10 @@
 //
 //   node tools/shoot.mjs --out shots/ --shots default
 //   node tools/shoot.mjs --out shots/ --tod dusk --pose rooftop
+//   node tools/shoot.mjs --out shots/ --pose street --build
+//
+// Use --build while other agents are editing: it snapshots the app to a temp
+// dir and serves that, so HMR cannot reload the page out from under the run.
 //
 // Boots the game in headless Chromium with a real GPU-less WebGL2 context
 // (SwiftShader), drives the camera to fixed poses, and writes PNGs. Also
@@ -14,9 +18,15 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
+// A bare flag is `true`. The previous version wrote `arr[i+1]?.startsWith('--')
+// ? true : arr[i+1]`, which yields `undefined` — i.e. falsy — for a flag that
+// happens to be the LAST argument, because there is no next element to test.
+// So `--build`, `--dom` and `--nolock` silently did nothing in that position.
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, arr) => {
-    if (a.startsWith('--')) acc.push([a.slice(2), arr[i + 1]?.startsWith('--') ? true : arr[i + 1]]);
+    if (!a.startsWith('--')) return acc;
+    const next = arr[i + 1];
+    acc.push([a.slice(2), next === undefined || next.startsWith('--') ? true : next]);
     return acc;
   }, []),
 );
@@ -134,6 +144,29 @@ async function acquireLock() {
   }
 }
 
+/** Places the camera and forces review-mode state for one pose. */
+async function applyPose(page, pose) {
+  await page.evaluate((p) => {
+    const e = window.__engine;
+    e.debug.peaceful = true;      // no AI, no damage wash over the art
+    e.debug.forceAds = !!p.ads;   // the controller owns ads; ask for it properly
+    e.player.teleport(p.pos[0], p.pos[1] - 1.59, p.pos[2]);
+    e.player.yaw = p.yaw * Math.PI / 180;
+    e.player.pitch = p.pitch * Math.PI / 180;
+    e.player.velocity.set(0, 0, 0);
+    e.hud?.setHealth(100);
+  }, pose);
+}
+
+/** Waits for the engine to be up, e.g. after an HMR reload wiped the context. */
+async function waitForEngine(page) {
+  await page.waitForFunction(
+    () => window.__engine && window.__engine.frame > 2,
+    null,
+    { timeout: TIMEOUT, polling: 250 },
+  );
+}
+
 /**
  * Captures one frame.
  *
@@ -155,6 +188,32 @@ async function capture(page, file, pose) {
     await page.screenshot({ path: file, timeout: SHOT_TIMEOUT });
     return;
   }
+  // Several agents edit source while runs are in flight, and every Vite HMR
+  // reload destroys the execution context mid-capture. Retry a few times —
+  // though under continuous editing the dev server cannot be made reliable at
+  // all, which is what --build is for.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await captureOnce(page, file, pose);
+    } catch (e) {
+      const transient = /Execution context was destroyed|Target closed|Most likely the page has been closed/i.test(String(e));
+      if (!transient || attempt >= 4) {
+        if (transient) {
+          throw new Error(
+            'page kept reloading mid-capture (HMR). Another agent is editing '
+            + 'source. Re-run with --build for a frozen snapshot that cannot reload.',
+          );
+        }
+        throw e;
+      }
+      console.log(`[shoot] page reloaded mid-capture (HMR); retry ${attempt}/3`);
+      await waitForEngine(page);
+      await applyPose(page, pose);
+    }
+  }
+}
+
+async function captureOnce(page, file, pose) {
   const dataUrl = await page.evaluate(async (frames) => {
     const e = window.__engine;
     e.stop();
@@ -188,9 +247,50 @@ async function capture(page, file, pose) {
   await page.evaluate(() => window.__engine.start());
 }
 
+/**
+ * Builds a frozen snapshot of the app into a temp dir and serves it, so no
+ * amount of concurrent source editing can reload the page mid-run. This is the
+ * only reliable way to review while other agents are working; the dev server's
+ * HMR will otherwise destroy the execution context at random.
+ *
+ * Returns { url, stop }.
+ */
+async function startFrozenServer() {
+  const { execFile, spawn } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const outDir = `/tmp/cod-frozen-${process.pid}`;
+
+  console.log('[shoot] building frozen snapshot...');
+  await promisify(execFile)('npx', ['vite', 'build', '--outDir', outDir, '--emptyOutDir'], {
+    cwd: process.cwd(), maxBuffer: 1 << 24,
+  });
+
+  const port = 4300 + (process.pid % 500);
+  const child = spawn('npx', ['vite', 'preview', '--outDir', outDir, '--port', String(port), '--strictPort'], {
+    cwd: process.cwd(), stdio: 'ignore', detached: false,
+  });
+  const url = `http://127.0.0.1:${port}/`;
+
+  // Wait for the preview server to answer rather than guessing at a delay.
+  for (let i = 0; i < 60; i++) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) break;
+    } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  console.log(`[shoot] frozen snapshot on ${url}`);
+  return {
+    url,
+    stop: () => { try { child.kill(); } catch { /* already gone */ } },
+  };
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
   const releaseLock = await acquireLock();
+  const frozen = args.build ? await startFrozenServer() : null;
+  const baseUrl = frozen ? frozen.url : URL_BASE;
 
   // The sandbox ships a preinstalled Chromium that may not match the revision
   // this Playwright build expects; prefer it over a download when present.
@@ -210,14 +310,36 @@ async function main() {
   });
   const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT } });
 
+  // A missing favicon is not a build failure. Left unfiltered it was the only
+  // console error in every clean run, so the harness exited non-zero and
+  // reported failure on runs that had rendered perfectly — the kind of false
+  // signal that teaches you to ignore real ones.
+  //
+  // The 404 is suppressed by URL, not by message text: Chromium's console text
+  // for a failed request does not name the resource, so a text filter broad
+  // enough to catch it ("Failed to load resource ... 404") would equally
+  // swallow a genuinely missing module. index.html now ships an inline icon so
+  // the request should not happen at all; this is belt and braces.
   const errors = [];
+  const benignUrls = new Set();
+  page.on('response', (r) => {
+    if (r.status() === 404 && /favicon/i.test(r.url())) benignUrls.add(r.url());
+  });
+  page.on('requestfailed', (r) => {
+    if (!/favicon/i.test(r.url())) errors.push(`request failed: ${r.url()}`);
+  });
+  let sawResourceError = 0;
   page.on('console', (m) => {
-    if (m.type() === 'error') errors.push(m.text());
+    if (m.type() === 'error') {
+      // Count bare resource errors; reconciled against benignUrls below.
+      if (/Failed to load resource/i.test(m.text())) sawResourceError++;
+      else errors.push(m.text());
+    }
     if (process.env.VERBOSE) console.log(`[${m.type()}]`, m.text());
   });
   page.on('pageerror', (e) => errors.push(String(e)));
 
-  const url = `${URL_BASE}?quality=${QUALITY}&tod=${TOD}&autostart=1`;
+  const url = `${baseUrl}?quality=${QUALITY}&tod=${TOD}&autostart=1`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
 
   // Wait for the engine to finish baking and start its loop.
@@ -227,23 +349,21 @@ async function main() {
     { timeout: TIMEOUT, polling: 250 },
   );
 
-  const names = SHOT_SETS[args.shots || 'default'] || (args.pose ? [args.pose] : SHOT_SETS.default);
+  // --pose wins over --shots, and neither falls through to the default set when
+  // it was asked for explicitly. The old expression looked up
+  // SHOT_SETS[args.shots || 'default'] first, which always matched, so --pose
+  // was silently ignored and every single-pose request rendered all six of the
+  // default set — minutes of SwiftShader time per invocation, for one image.
+  const names = args.pose
+    ? String(args.pose).split(',').map((s) => s.trim()).filter(Boolean)
+    : (SHOT_SETS[args.shots] || SHOT_SETS.default);
   const written = [];
 
   for (const name of names) {
     const pose = POSES[name];
     if (!pose) { console.error(`unknown pose ${name}`); continue; }
 
-    await page.evaluate((p) => {
-      const e = window.__engine;
-      e.debug.peaceful = true;      // no AI, no damage wash over the art
-      e.debug.forceAds = !!p.ads;   // the controller owns ads; ask for it properly
-      e.player.teleport(p.pos[0], p.pos[1] - 1.59, p.pos[2]);
-      e.player.yaw = p.yaw * Math.PI / 180;
-      e.player.pitch = p.pitch * Math.PI / 180;
-      e.player.velocity.set(0, 0, 0);
-      e.hud?.setHealth(100);
-    }, pose);
+    await applyPose(page, pose);
 
     // Let the ADS blend, exposure adaptation, and shadow re-fit settle. This
     // is wall-clock, and SwiftShader runs at well under 1fps, so it is far
@@ -268,6 +388,12 @@ async function main() {
   });
   console.log('stats', JSON.stringify(stats));
 
+  // Any resource error beyond the ones we matched to a benign URL is real.
+  const unexplained = sawResourceError - benignUrls.size;
+  if (unexplained > 0) {
+    errors.push(`${unexplained} unexplained resource load failure(s) — run with VERBOSE=1 to see them`);
+  }
+
   if (errors.length) {
     console.error(`\n${errors.length} console error(s):`);
     for (const e of errors.slice(0, 12)) console.error('  ', e);
@@ -275,6 +401,7 @@ async function main() {
 
   await writeFile(path.join(OUT, 'report.json'), JSON.stringify({ stats, errors, written, tod: TOD, quality: QUALITY }, null, 2));
   await browser.close();
+  frozen?.stop();
   releaseLock();
   process.exit(errors.length ? 2 : 0);
 }

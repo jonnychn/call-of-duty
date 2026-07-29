@@ -115,15 +115,15 @@ export class GeometryBuilder {
     return m;
   }
 
-  _key(mat, collide, hidden, x, z) {
+  _key(mat, collide, hidden, x, z, shadow, vc) {
     const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
-    return `${mat.name || mat.uuid}|${collide ? 'c' : 'n'}${hidden ? 'h' : ''}|${cx},${cz}`;
+    return `${mat.name || mat.uuid}|${collide ? 'c' : 'n'}${hidden ? 'h' : ''}${shadow ? 's' : ''}${vc ? 'v' : ''}|${cx},${cz}`;
   }
 
-  _push(mat, geo, collide, x, z, hidden) {
-    const key = this._key(mat, collide, hidden, x, z);
+  _push(mat, geo, collide, x, z, hidden, shadow = true, vc = false) {
+    const key = this._key(mat, collide, hidden, x, z, shadow, vc);
     let b = this.buckets.get(key);
-    if (!b) { b = { mat, geos: [], collide, hidden }; this.buckets.set(key, b); }
+    if (!b) { b = { mat, geos: [], collide, hidden, shadow, vc }; this.buckets.set(key, b); }
     b.geos.push(geo);
   }
 
@@ -144,7 +144,24 @@ export class GeometryBuilder {
     }
     g.applyMatrix4(this._m4);
     this.stats.boxes++;
-    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true);
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow !== false);
+  }
+
+  /**
+   * Box with a free rotation. Used for the handful of things that must not be
+   * dimensionally perfect — leaning T-walls, sagging awning slats, spalled
+   * copings. Same world-projected UVs as `box`.
+   */
+  tilted(mat, x, y, z, w, h, d, rot, opts) {
+    if (w <= 0 || h <= 0 || d <= 0) return;
+    const tile = mat.userData.tile ?? 2;
+    const g = worldUvBox(w, h, d, tile, x - w / 2, y, z - d / 2);
+    this._e.set(rot.x || 0, rot.y || 0, rot.z || 0);
+    this._q.setFromEuler(this._e);
+    this._m4.compose(new THREE.Vector3(x, y + h / 2, z), this._q, new THREE.Vector3(1, 1, 1));
+    g.applyMatrix4(this._m4);
+    this.stats.boxes++;
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow !== false);
   }
 
   /** Box specified by min/max corners. */
@@ -165,7 +182,34 @@ export class GeometryBuilder {
       new THREE.Vector3(scale?.x ?? 1, scale?.y ?? 1, scale?.z ?? 1),
     );
     g.applyMatrix4(this._m4);
-    this._push(mat, g, opts?.collide !== false, position.x, position.z, opts?.hidden === true);
+    this._push(mat, g, opts?.collide !== false, position.x, position.z, opts?.hidden === true, opts?.shadow !== false);
+  }
+
+  /**
+   * A four-vertex quad carrying per-vertex greyscale in its `color` attribute.
+   *
+   * This is the grime layer. The material it goes into is multiply-blended, so
+   * a vertex colour of 1 leaves the surface underneath untouched and anything
+   * below 1 darkens it — which is exactly how dirt behaves, and it means a
+   * stain can fade to nothing without a soft-edged alpha texture per stain.
+   * Verts wind p0 -> p1 -> p2 -> p3 around the quad; `cols` are the four
+   * multipliers in the same order. `uvw`/`uvh` are the world sizes the streak
+   * texture should span (v runs p0->p3, i.e. usually downwards).
+   */
+  quad(mat, p0, p1, p2, p3, cols, uvw, uvh) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+      p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], p3[0], p3[1], p3[2],
+    ]), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([
+      0, 0, uvw, 0, uvw, uvh, 0, uvh,
+    ]), 2));
+    const c = new Float32Array(12);
+    for (let i = 0; i < 4; i++) { c[i * 3] = cols[i]; c[i * 3 + 1] = cols[i]; c[i * 3 + 2] = cols[i]; }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.computeVertexNormals();
+    this._push(mat, g, false, p0[0], p0[2], false, false, true);
   }
 
   /**
@@ -181,7 +225,10 @@ export class GeometryBuilder {
     g.rotateX(-Math.PI / 2);
     if (rotY) g.rotateY(rotY);
     g.translate(x, y, z);
-    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true);
+    // Horizontal quads are road markings, scorch, gravel yards and paper
+    // scraps. A single-sided flat plane lying on the ground can only ever
+    // shadow itself, so none of them belong in the shadow pass.
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow === true);
   }
 
   /**
@@ -189,7 +236,7 @@ export class GeometryBuilder {
    * COLLISION_LAYER enabled; non-collidable ones are flagged noCollide.
    */
   emit(root, collisionLayer) {
-    let meshes = 0, tris = 0, collidableTris = 0;
+    let meshes = 0, tris = 0, collidableTris = 0, shadowTris = 0;
     for (const [key, b] of this.buckets) {
       if (!b.geos.length) continue;
       const merged = mergeGeometries(b.geos, false);
@@ -198,13 +245,21 @@ export class GeometryBuilder {
       merged.computeBoundingSphere();
       const mesh = new THREE.Mesh(merged, b.mat);
       mesh.name = key;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
+      // Merged geometry does not inherit anything from its inputs, so these two
+      // flags have to be set here or the whole level silently drops out of the
+      // shadow pass. Casting is opt-out rather than blanket-on: ground decals,
+      // the grime layer and the 400-piece rubble scatter would triple the
+      // shadow-pass triangle count to no visible end.
+      mesh.castShadow = b.shadow !== false;
+      mesh.receiveShadow = !b.vc;
       if (b.collide) mesh.layers.enable(collisionLayer);
       else mesh.userData.noCollide = true;
       // Invisible blockers: collision-only volumes that keep the player inside
       // the level without adding a slab of visible geometry behind the set.
       if (b.hidden) { mesh.visible = false; mesh.castShadow = false; mesh.receiveShadow = false; }
+      // The grime layer is multiply-blended: it must draw after the opaque set
+      // and must never write depth or occlude anything.
+      if (b.vc) mesh.renderOrder = 2;
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrixWorld();
       root.add(mesh);
@@ -212,8 +267,9 @@ export class GeometryBuilder {
       const t = (merged.index ? merged.index.count : merged.attributes.position.count) / 3;
       tris += t;
       if (b.collide) collidableTris += t;
+      if (mesh.castShadow) shadowTris += t;
     }
     this.buckets.clear();
-    return { meshes, tris, collidableTris, boxes: this.stats.boxes };
+    return { meshes, tris, collidableTris, shadowTris, boxes: this.stats.boxes };
   }
 }

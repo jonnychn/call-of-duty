@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CollisionOctree } from './CollisionOctree.js';
 import { mulberry32 } from '../render/Noise.js';
 import { GeometryBuilder } from './Builder.js';
+import { streakTexture, blotchTexture, grimeMaterial } from './Grime.js';
 import * as P from './Props.js';
 
 // ---------------------------------------------------------------------------
@@ -132,6 +133,17 @@ export class Level {
     this.M.cBlue = b.tinted('__cBlue', 'containerBlue', 0x9aa6ac, { tile: 1.0 });
     this.M.wire = b.tinted('__wire', 'gunmetal', 0x2a2a2c, { roughness: 0.8, metalness: 0.5, tile: 1 });
     this.M.trim = this.M.conc;
+    // Anything the player looks *into* — the occlusion core behind a window, the
+    // liner inside a reveal — has to be much darker than the facade it sits in.
+    // The single reason the old windows read as painted-on rectangles is that
+    // the mass 2 m behind them was the same cream plaster as the wall face, so
+    // a real hole with a real reveal still returned the same value as the wall.
+    this.M.interior = b.tinted('__interior', 'concreteWall', 0x2b2723, { roughness: 1.0, tile: 3 });
+    this.M.reveal = b.tinted('__reveal', 'plasterPale', 0x4a4238, { roughness: 1.0, tile: 1.4 });
+    // The multiply-blend grime layer. Two materials: streaked for the vertical
+    // washes down a facade, mottled for contact darkening and soffits.
+    this.M.grime = grimeMaterial('__grime', streakTexture(256));
+    this.M.ao = grimeMaterial('__ao', blotchTexture(128));
 
     this._ground();
     this._street();
@@ -160,6 +172,89 @@ export class Level {
       new THREE.Vector3(2, 1.0, 96),
     );
     return this.root;
+  }
+
+  // =========================================================================
+  //  Grime — the multiply-blend wear layer (see Grime.js)
+  // =========================================================================
+
+  /**
+   * A vertical stain on a facade. `axis` is the direction the wall runs, `p` its
+   * plane, `out` which side it faces. The quad hangs from `yTop` downwards; the
+   * two darkness values are the top and bottom multipliers, so the same call
+   * makes either a drip running down from a sill (dark top, clean bottom) or a
+   * splash band rising off the pavement (clean top, dark bottom).
+   *
+   * Everything sits 2 cm off the wall, which is *inside* the 7–10 cm projection
+   * of every sill, string course and balcony slab in the level. That is
+   * deliberate: the trim then correctly occludes the stain from above, which is
+   * how a dirt run actually starts.
+   */
+  _stain(axis, p, out, c, yTop, h, w, topDark, botDark, mat) {
+    if (h <= 0.02 || w <= 0.02) return;
+    const q = p + out * 0.02;
+    const yb = yTop - h;
+    const m = mat || this.M.grime;
+    const cols = [topDark, topDark, botDark, botDark];
+    if (axis === 'x') {
+      this.b.quad(m, [c - w / 2, yTop, q], [c + w / 2, yTop, q], [c + w / 2, yb, q], [c - w / 2, yb, q],
+        cols, w / 2.1, h / 3.4);
+    } else {
+      this.b.quad(m, [q, yTop, c - w / 2], [q, yTop, c + w / 2], [q, yb, c + w / 2], [q, yb, c - w / 2],
+        cols, w / 2.1, h / 3.4);
+    }
+  }
+
+  /** Downward-facing soffit shading: the underside of a slab, awning or lintel. */
+  _soffit(x, y, z, w, d, rotY = 0, dark = 0.6) {
+    const c = Math.cos(rotY), s = Math.sin(rotY);
+    const L = (u, v) => [x + u * c - v * s, y, z + u * s + v * c];
+    this.b.quad(this.M.ao, L(-w / 2, -d / 2), L(w / 2, -d / 2), L(w / 2, d / 2), L(-w / 2, d / 2),
+      [dark, dark, dark, dark], w / 1.5, d / 1.5);
+  }
+
+  /**
+   * The dark ring where something meets the ground. Four quads that overrun each
+   * other at the corners, so the corners double-multiply and come out darkest —
+   * which is where dirt collects anyway. This is the cheapest fix available for
+   * the "props look pasted on" read, and it costs 8 triangles per object.
+   */
+  _contact(x, z, w, d, rotY = 0, dark = 0.74, reach = 0.7, y = 0.025) {
+    const b = this.b;
+    const cs = Math.cos(rotY), sn = Math.sin(rotY);
+    const L = (u, v) => [x + u * cs - v * sn, y, z + u * sn + v * cs];
+    const hw = w / 2, hd = d / 2, r = reach;
+    // +z and -z sides, run out past the corners
+    b.quad(this.M.ao, L(-hw - r, hd), L(hw + r, hd), L(hw + r, hd + r), L(-hw - r, hd + r), [dark, dark, 1, 1], (w + 2 * r) / 1.4, r / 1.4);
+    b.quad(this.M.ao, L(hw + r, -hd), L(-hw - r, -hd), L(-hw - r, -hd - r), L(hw + r, -hd - r), [dark, dark, 1, 1], (w + 2 * r) / 1.4, r / 1.4);
+    b.quad(this.M.ao, L(hw, hd + r), L(hw, -hd - r), L(hw + r, -hd - r), L(hw + r, hd + r), [dark, dark, 1, 1], (d + 2 * r) / 1.4, r / 1.4);
+    b.quad(this.M.ao, L(-hw, -hd - r), L(-hw, hd + r), L(-hw - r, hd + r), L(-hw - r, -hd - r), [dark, dark, 1, 1], (d + 2 * r) / 1.4, r / 1.4);
+  }
+
+  /** Contact darkening along one straight run of wall base. */
+  _contactRun(axis, p, out, a0, a1, dark = 0.68, reach = 0.85, y = 0.03) {
+    const q0 = p + out * 0.02, q1 = p + out * (0.02 + reach);
+    if (axis === 'x') {
+      this.b.quad(this.M.ao, [a0, y, q0], [a1, y, q0], [a1, y, q1], [a0, y, q1],
+        [dark, dark, 1, 1], (a1 - a0) / 1.4, reach / 1.4);
+    } else {
+      this.b.quad(this.M.ao, [q0, y, a0], [q0, y, a1], [q1, y, a1], [q1, y, a0],
+        [dark, dark, 1, 1], (a1 - a0) / 1.4, reach / 1.4);
+    }
+  }
+
+  /**
+   * Chipped concrete. Small spalled boxes clustered on an edge so the corner
+   * stops being a mathematically perfect line. Used on pier plinths, kerbs and
+   * barrier ends — the places the eye gets closest to.
+   */
+  _chip(x, y, z, n = 4, scale = 1) {
+    const b = this.b, R = () => this.rng();
+    for (let i = 0; i < n; i++) {
+      const s = (0.08 + R() * 0.17) * scale;
+      b.tilted(this.M.concF, x + (R() - 0.5) * 0.5 * scale, y + (R() - 0.5) * 0.45 * scale, z + (R() - 0.5) * 0.5 * scale,
+        s * 1.5, s, s * 1.3, { x: R() * 0.6, y: R() * 3, z: R() * 0.6 }, { collide: false, shadow: false });
+    }
   }
 
   // =========================================================================
@@ -201,13 +296,27 @@ export class Level {
     const b = this.b, m = this.M.trim;
     const d = t + 0.14;
     const N = { collide: false };
+    // Dark liner inside the opening. Without it the reveal returns the same
+    // cream value as the wall face and the hole reads as a painted rectangle no
+    // matter how much real depth it has.
+    const RL = { collide: false, shadow: false };
+    const rm = this.M.reveal, jw = 0.07, td = t * 0.99;
     if (axis === 'x') {
+      for (const s of [-1, 1]) b.box(rm, c + s * (w / 2 - jw / 2), y, p, jw, h, td, 0, RL);
+      b.box(rm, c, y + h - 0.07, p, w, 0.07, td, 0, RL);
       b.box(m, c, y - 0.09, p + outward * 0.03, w + 0.34, 0.1, d, 0, N);   // sill
       b.box(m, c, y + h, p + outward * 0.03, w + 0.34, 0.14, d, 0, N);     // lintel
     } else {
+      for (const s of [-1, 1]) b.box(rm, p, y, c + s * (w / 2 - jw / 2), td, h, jw, 0, RL);
+      b.box(rm, p, y + h - 0.07, c, td, 0.07, w, 0, RL);
       b.box(m, p + outward * 0.03, y - 0.09, c, d, 0.1, w + 0.34, 0, N);
       b.box(m, p + outward * 0.03, y + h, c, d, 0.14, w + 0.34, 0, N);
     }
+    // Water leaving the sill stains the wall below it. This is the single most
+    // recognisable piece of building wear there is.
+    const drip = 0.9 + this.rng() * 1.7;
+    this._stain(axis, p, outward, c, y - 0.1, drip, w * 0.82, 0.60, 1.0);
+    this._stain(axis, p, outward, c, y - 0.1, drip * 0.45, w * 0.34, 0.46, 0.95);
   }
 
   /**
@@ -300,12 +409,17 @@ export class Level {
         for (const s of [-1, 1]) b.box(trim, c + s * (bw / 2 - 0.05), y, pz, 0.1, 0.95, proj, 0, { collide: false });
         b.box(trim, c, y, f.p + f.out * proj, bw, 0.95, 0.1, 0, { collide: false });
         for (let i = -3; i <= 3; i++) b.box(this.M.rust, c + i * 0.34, y + 0.1, f.p + f.out * proj, 0.05, 0.75, 0.05, 0, { collide: false });
+        this._soffit(c, y - 0.17, pz, bw, proj, 0, 0.5);
       } else {
         const px = f.p + f.out * (proj / 2);
         b.box(this.M.concF, px, y - 0.16, c, proj, 0.16, bw, 0, { collide: false });
         for (const s of [-1, 1]) b.box(trim, px, y, c + s * (bw / 2 - 0.05), proj, 0.95, 0.1, 0, { collide: false });
         b.box(trim, f.p + f.out * proj, y, c, 0.1, 0.95, bw, 0, { collide: false });
+        this._soffit(px, y - 0.17, c, proj, bw, 0, 0.5);
       }
+      // Shadow-side wash on the wall the balcony hangs off, and the run of dirt
+      // that leaves its outer edge.
+      this._stain(f.axis, f.p, f.out, c, y - 0.18, 1.5, bw * 0.95, 0.55, 1.0, this.M.ao);
       this.balconyAnchors ??= [];
       this.balconyAnchors.push({ f, c, y, out: f.out });
     }
@@ -315,6 +429,11 @@ export class Level {
     for (let fl = 1; fl < floors; fl++) {
       const y = y0 + fl * fh - 0.12;
       b.aabb(trim, x0 - 0.07, y, z0 - 0.07, x1 + 0.07, y + 0.13, z1 + 0.07, { collide: false });
+      // Every projecting course sheds water onto the wall under it.
+      for (const f of faces) {
+        if (!open.has(f.n)) continue;
+        this._stain(f.axis, f.p, f.out, (f.a0 + f.a1) / 2, y, 0.85, f.a1 - f.a0, 0.70, 1.0);
+      }
     }
 
     // Interior floors + occlusion core.
@@ -329,10 +448,11 @@ export class Level {
       }
       const cy0 = y0 + hf * fh;
       const inset = 2.1;
+      const core = this.M.interior;
       if (w > inset * 2 + 1 && d > inset * 2 + 1) {
-        b.aabb(mat, x0 + inset, cy0, z0 + inset, x1 - inset, y0 + H, z1 - inset, NC);
+        b.aabb(core, x0 + inset, cy0, z0 + inset, x1 - inset, y0 + H, z1 - inset, NC);
       } else {
-        b.aabb(mat, x0 + t, cy0, z0 + t, x1 - t, y0 + H, z1 - t, NC);
+        b.aabb(core, x0 + t, cy0, z0 + t, x1 - t, y0 + H, z1 - t, NC);
       }
     }
 
@@ -365,6 +485,35 @@ export class Level {
       if (shell) b.aabb(mat, x0, y0, z0, x1, roofY, z1, { collide: true, hidden: true });
       b.aabb(trim, x0 - 0.09, roofY + ph, z0 - 0.09, x1 + 0.09, roofY + ph + 0.12, z1 + 0.09, { collide: false });
       if (o.roofClutter !== false) this._roofClutter(x0 + 1.2, x1 - 1.2, z0 + 1.2, z1 - 1.2, roofY, o.walkableRoof === true);
+    }
+
+    // ---- Grime pass. Three washes per exposed face, which between them supply
+    // the whole vertical value gradient the merged plaster slab cannot:
+    //
+    //   1. a broad wash over the lower two storeys, so the top of the building
+    //      reads as sun-bleached relative to the bottom (a multiply layer can
+    //      only darken, so "bleached above" is authored as "dirtier below");
+    //   2. a tight splash band in the first metre, where rain comes back off
+    //      the pavement;
+    //   3. two or three narrow runs the full height, from where the parapet
+    //      coping leaks — the vertical streaks that stop a facade being a
+    //      single flat panel.
+    for (const f of faces) {
+      if (!open.has(f.n)) continue;
+      const span = f.a1 - f.a0, cmid = (f.a0 + f.a1) / 2;
+      const roofY = y0 + H;
+      this._stain(f.axis, f.p, f.out, cmid, y0 + Math.min(H, 7.2), Math.min(H, 7.2), span, 1.0, 0.80);
+      this._stain(f.axis, f.p, f.out, cmid, y0 + 1.15, 1.15, span, 1.0, 0.60);
+      const nRun = Math.max(2, Math.round(span / 6));
+      for (let i = 0; i < nRun; i++) {
+        const c = f.a0 + span * ((i + 0.5 + (R() - 0.5) * 0.6) / nRun);
+        const len = H * (0.4 + R() * 0.55);
+        this._stain(f.axis, f.p, f.out, c, roofY - 0.35, len, 0.5 + R() * 0.9, 0.62 + R() * 0.2, 1.0);
+      }
+      // Contact darkening where the wall meets the ground. The street frontages
+      // stand on the raised pavement; everything else on bare dirt.
+      const gy = (f.axis === 'z' && Math.abs(f.p) < KERB + 0.4) ? PAVE_Y + 0.012 : 0.04;
+      this._contactRun(f.axis, f.p, f.out, f.a0, f.a1, 0.66, 0.8, y0 + gy);
     }
 
     // Facade services: drainpipes, AC boxes, dishes, cable runs.
@@ -442,6 +591,17 @@ export class Level {
       put(c, pierW, 0, clear, mat, depth);
       put(c, pierW + 0.24, 0, 0.5, this.M.brick, depth + 0.24);          // pier base
       put(c, pierW + 0.2, clear - 0.28, 0.28, this.M.concF, depth + 0.2); // impost
+      // Piers are the closest architecture the player walks past. Ground them
+      // and knock their corners about.
+      const px = axis === 'z' ? p : c, pz = axis === 'z' ? c : p;
+      this._contact(px, pz, axis === 'z' ? depth + 0.3 : pierW + 0.3, axis === 'z' ? pierW + 0.3 : depth + 0.3, 0, 0.60, 0.55);
+      this._chip(px + (axis === 'z' ? depth / 2 : pierW / 2) * (axis === 'z' ? -1 : 1), 0.5, pz, 3, 0.9);
+      for (const s of [-1, 1]) {
+        this._stain(axis === 'z' ? 'z' : 'x', axis === 'z' ? p + s * depth / 2 : p + s * depth / 2, s,
+          c, clear - 0.3, 1.4, pierW, 0.66, 1.0);
+        this._stain(axis === 'z' ? 'z' : 'x', axis === 'z' ? p + s * depth / 2 : p + s * depth / 2, s,
+          c, 1.0, 1.0, pierW + 0.2, 1.0, 0.56);
+      }
     }
     // Segmental heads over each bay, cut as slabs.
     const span = step - pierW, rr = span / 2;
@@ -537,6 +697,9 @@ export class Level {
     }
     b.plane(this.M.scorch, x, 0.035, z, r * 2.6, r * 2.6, 0, { collide: false });
     b.plane(this.M.gravel, x, 0.05, z, r * 1.5, r * 1.5, 0, { collide: false });
+    // Ring of shade inside the rim: a crater with no darkening in it is a
+    // circle of stones, not a hole.
+    this._contact(x, z, r * 1.4, r * 1.4, 0.4, 0.58, r * 0.5, 0.062);
     for (let i = 0; i < 40; i++) {
       const a = R() * Math.PI * 2, rr = r * (1.0 + R() * 2.4);
       const s = 0.1 + R() * 0.36;
@@ -669,11 +832,21 @@ export class Level {
   }
 
   _twall(x, z, rotY) {
-    const b = this.b;
-    const N = { collide: false };
-    b.box(this.M.concF, x, 0, z, 3.9, 0.25, 1.5, rotY, N);
-    b.box(this.M.conc, x, 0.25, z, 3.6, 3.4, 0.42, rotY, N);
-    b.box(this.M.conc, x, 3.65, z, 3.7, 0.16, 0.55, rotY, N);
+    const b = this.b, R = () => this.rng();
+    const N = { collide: false, shadow: false };
+    // T-walls are craned into place one at a time by people in a hurry. A
+    // perfectly aligned, perfectly plumb ring of them is the single most
+    // synthetic thing that was in this level: each one now leans and twists a
+    // little, and the run reads as placed rather than extruded.
+    const lean = (R() - 0.5) * 0.045, twist = rotY + (R() - 0.5) * 0.05;
+    const dx = (R() - 0.5) * 0.16, dz = (R() - 0.5) * 0.16;
+    const cx = x + dx, cz = z + dz;
+    const tilt = rotY ? { x: lean, y: twist, z: 0 } : { x: 0, y: twist, z: lean };
+    b.box(this.M.concF, cx, 0, cz, 3.9, 0.25, 1.5, twist, N);
+    b.tilted(this.M.conc, cx, 0.25, cz, 3.6, 3.4, 0.42, tilt, N);
+    b.tilted(this.M.conc, cx, 3.65, cz, 3.7, 0.16, 0.55, tilt, N);
+    if (R() < 0.35) this._chip(cx + (R() - 0.5) * 3.2, 0.3 + R() * 3.2, cz, 3, 0.9);
+    this._contact(cx, cz, rotY ? 1.6 : 4.0, rotY ? 4.0 : 1.6, 0, 0.72, 0.45);
   }
 
   // =========================================================================
@@ -768,7 +941,7 @@ export class Level {
     // Steel roller shutter half-open over the shopfront.
     b.box(this.M.rust, -10.55, 2.35, 28.4, 0.14, 0.42, 3.7, 0, { collide: false });
     for (let i = 0; i < 4; i++) b.box(this.M.rust, -10.5, 1.95 + i * 0.1, 28.4, 0.06, 0.06, 3.6, 0, { collide: false });
-    P.awning(b, this.M.tarp, this.M.steelProp, -9.6, 3.35, 28.4, 4.6, 1.9, -Math.PI / 2);
+    P.awning(b, this.M.tarp, this.M.steelProp, -9.6, 3.35, 28.4, 4.6, 1.9, -Math.PI / 2, R);
     // Shop sign board.
     b.box(this.M.wood, -10.5, 2.95, 24.6, 0.1, 0.75, 3.2, 0, { collide: false });
 
@@ -955,7 +1128,7 @@ export class Level {
     }
     // Continuous awning along the east side.
     for (let i = 0; i < 5; i++) {
-      P.awning(b, this.M.tarp, this.M.steelProp, c.x1 - 1.0, 2.9, c.z0 + 2.2 + i * 3.6, 3.4, 2.0, -Math.PI / 2);
+      P.awning(b, this.M.tarp, this.M.steelProp, c.x1 - 1.0, 2.9, c.z0 + 2.2 + i * 3.6, 3.4, 2.0, -Math.PI / 2, R);
     }
     // Laundry and bunting overhead — the thing that makes a courtyard read.
     P.laundry(b, this.M.wire, this.M.cloth, c.x0 + 0.4, 7.0, c.z0 + 4, c.x1 - 0.4, 6.4, c.z0 + 7, R);
@@ -964,6 +1137,7 @@ export class Level {
 
     // Well / cistern head at the centre — a landmark inside the yard.
     P.cylinder(b, this.M.conc, cx, 0, cz, 1.15, 0.85, null, { hi: true });
+    this._contact(cx, cz, 2.3, 2.3, 0, 0.58, 0.7, 0.055);
     P.cylinder(b, this.M.dark, cx, 0.85, cz, 0.95, 0.04, null, { hi: true, collide: false });
     for (const s of [-1, 1]) b.box(this.M.rust, cx + s * 1.05, 0.85, cz, 0.1, 1.9, 0.1, 0, { collide: false });
     b.box(this.M.rust, cx, 2.7, cz, 2.3, 0.1, 0.1, 0, { collide: false });
@@ -1058,6 +1232,14 @@ export class Level {
       // opening reads as a hole punched in a slab.
       b.aabb(this.M.brick, -hw - 0.65, y, z0 - 0.22, -hw, y + sh, z0, { collide: false });
       b.aabb(this.M.brick, hw, y, z0 - 0.22, hw + 0.65, y + sh, z0, { collide: false });
+      // The intrados is a tunnel soffit: it gets almost no sky and should be the
+      // darkest surface in the hero frame, not the same cream as the sunlit face.
+      const iv = 0.42 + 0.34 * (hw / r);
+      for (const s of [-1, 1]) {
+        const xq = s * (hw - 0.02);
+        b.quad(this.M.ao, [xq, y, z0], [xq, y, z1], [xq, y + sh, z1], [xq, y + sh, z0],
+          [iv, iv, iv, iv], (z1 - z0) / 1.5, sh / 1.5);
+      }
     }
     b.aabb(this.M.brick, -r - 0.65, springing - 0.6, z0 - 0.22, -r, springing, z0, { collide: false });
     b.aabb(this.M.brick, r, springing - 0.6, z0 - 0.22, r + 0.65, springing, z0, { collide: false });
@@ -1115,6 +1297,35 @@ export class Level {
     for (const dx of [-1.3, 1.3]) b.box(this.M.steelProp, -3.4 + dx, 3.5, z0 - 1.05, 0.05, 0.5, 0.05, 0, { collide: false });
     b.box(this.M.steelProp, -3.4, 2.55, z0 - 1.05, 3.0, 0.95, 0.06, 0.06, { collide: false });
 
+    // ---- Grime on the hero element. The gatehouse is the largest surface in
+    // the frame the player walks toward for the whole level; if any facade in
+    // the set has to hold up to a long look it is this one.
+    for (const s of [-1, 1]) {
+      const px0 = s > 0 ? r : -16, px1 = s > 0 ? 16 : -r;
+      const pc = (px0 + px1) / 2, pw = px1 - px0;
+      // South face: a wash off the coping the full height, the band under the
+      // corbelled string course, and the splash zone off the road.
+      this._stain('x', z0 - 0.001, -1, pc, top + 0.3, top - 1.3, pw, 0.80, 1.0);
+      this._stain('x', z0 - 0.001, -1, pc, springing - 0.36, 1.9, pw, 0.62, 1.0);
+      this._stain('x', z0 - 0.001, -1, pc, 1.32, 1.3, pw, 1.0, 0.60);
+      for (let i = 0; i < 5; i++) {
+        const c = px0 + pw * ((i + 0.5 + (R() - 0.5) * 0.7) / 5);
+        this._stain('x', z0 - 0.001, -1, c, top + 0.3, top * (0.45 + R() * 0.5), 0.55 + R() * 0.85, 0.52 + R() * 0.2, 1.0);
+      }
+      // Passage walls, and the ground under the vault.
+      this._stain('z', s * (r - 0.02), -s, (z0 + z1) / 2, springing, springing, z1 - z0, 0.52, 0.40);
+      this._contactRun('z', s * r, -s, z0, z1, 0.55, 1.0, 0.055);
+      this._contactRun('z', s * (r + 0.2), s, z0 - 0.2, z1 + 0.2, 0.62, 0.9, 0.055);
+      // Spalled plinth corners.
+      this._chip(s * (r + 0.15), 0.55, z0 - 0.15, 5, 1.15);
+      this._chip(s * (r + 0.15), 0.2, z1 + 0.15, 3, 1.0);
+      this._chip(s * 15.9, 0.4, z0 - 0.15, 4, 1.0);
+    }
+    // A dirty apron of road under and just outside the arch: the passage floor
+    // never gets rained on, so it holds a different, darker tone.
+    b.quad(this.M.ao, [-r, 0.062, z0 - 1.2], [r, 0.062, z0 - 1.2], [r, 0.062, z1 + 1.2], [-r, 0.062, z1 + 1.2],
+      [0.93, 0.93, 0.78, 0.78], 9, 6);
+
     // Blast damage: the west pier has taken a hit.
     b.box(this.M.dark, -r - 1.6, 0, z0 - 0.15, 2.6, 3.2, 0.35, 0.05, { collide: false });
     P.rebar(b, this.M.rust, -r - 1.4, 2.6, z0 - 0.2, 6, 1.4, 0.8, R);
@@ -1155,6 +1366,7 @@ export class Level {
     const mat = this.M.plasterB;
     const gal = 16.8;                                   // muezzin's gallery
     b.box(this.M.concF, mx, 0, mz, 6.8, 0.9, 6.8);
+    this._contact(mx, mz, 6.9, 6.9, 0, 0.60, 1.1, 0.045);
     b.box(this.M.brick, mx, 0.9, mz, 5.6, 2.2, 5.6);
     b.box(this.M.concF, mx, 3.1, mz, 6.0, 0.3, 6.0, 0, { collide: false });
     b.box(mat, mx, 3.4, mz, 5.0, 8.0, 5.0);
@@ -1241,7 +1453,7 @@ export class Level {
     //     the frame from inside the square and throws bars of shadow across it.
     this._arcade(-11.6, -1.0, 19.0, 3.5, 3.05, 'z');
     for (let i = 0; i < 5; i++) {
-      P.awning(b, this.M.tarp, this.M.steelProp, -13.4, 2.9, 0.6 + i * 3.6, 3.2, 2.0, Math.PI / 2);
+      P.awning(b, this.M.tarp, this.M.steelProp, -13.4, 2.9, 0.6 + i * 3.6, 3.2, 2.0, Math.PI / 2, R);
     }
     // The "wall" review pose stands 3.7 m off MA's east face, so that one strip
     // of facade has to survive a close read: threshold step, drain, meter box,
@@ -1260,6 +1472,7 @@ export class Level {
       b.box(this.M.tile, fx + Math.cos(a) * 2.05, 0.62, fz + Math.sin(a) * 2.05, 1.95, 0.1, 0.62, -a, { collide: false });
     }
     b.plane(this.M.tile, fx, 0.16, fz, 3.6, 3.6, 0.4, { collide: false });
+    this._contact(fx, fz, 4.4, 4.4, 0, 0.62, 0.8, 0.055);
     P.cylinder(b, this.M.concF, fx, 0.16, fz, 0.62, 0.5, null, { hi: true });
     P.cylinder(b, this.M.concF, fx, 0.66, fz, 0.34, 1.1, null, { hi: true });
     P.cylinder(b, this.M.steelProp, fx, 1.76, fz, 0.16, 0.42, null, { hi: true, collide: false });
@@ -1310,6 +1523,7 @@ export class Level {
       b.box(this.M.rust, x + c * o - s * (L / 2 + 0.03), y + 0.2, z + s * o + c * (L / 2 + 0.03), 0.1, H - 0.5, 0.1, rotY, { collide: false });
     }
     b.box(this.M.rust, x - s * (L / 2 + 0.04), y + 1.1, z + c * (L / 2 + 0.04), 0.9, 0.12, 0.08, rotY, { collide: false });
+    if (y < 0.4) this._contact(x, z, W + 0.2, L + 0.2, rotY, 0.60, 0.75, y + 0.03);
   }
 
   /**
@@ -1414,6 +1628,7 @@ export class Level {
     // the carriageway 12 m ahead — a mid-ground silhouette you route around,
     // clear of the arch above it and clear of the spawn behind it.
     P.busWreck(b, this.M.busBody, this.M.dark, this.M.rust, this.M.glass, -5.4, 0, 50.0, 0.87);
+    this._contact(-5.4, 50.0, 2.7, 10.6, 0.87, 0.52, 1.0, 0.058);
     this._cover(-1.0, 47.6); this._cover(-6.4, 53.4);
     b.plane(this.M.scorch, -5.4, 0.055, 50.0, 13, 7, 0.87, { collide: false });
     // Debris field thrown off the bus, and one wheel well away from it.
@@ -1429,20 +1644,35 @@ export class Level {
 
     // A second car wreck pulled onto the pavement as a firing position.
     P.carWreck(b, this.M.dark, this.M.dark, this.M.rust, 8.6, PAVE_Y, 44.0, 0.18, R);
+    this._contact(8.6, 44.0, 2.0, 4.4, 0.18, 0.56, 0.8, PAVE_Y + 0.02);
     P.sandbags(b, this.M.bag, 7.9, PAVE_Y, 41.0, Math.PI, 3, 6);
+    this._contact(7.9, 41.0, 3.2, 1.6, 0, 0.66, 0.5, PAVE_Y + 0.02);
     this._cover(8.4, 42.0);
 
     // Barriers and checkpoint furniture staged along the corridor.
-    for (let i = 0; i < 5; i++) P.jerseyBarrier(b, this.M.conc, -6.2, 0, 26 + i * 3.5, 0.02);
-    for (let i = 0; i < 4; i++) P.jerseyBarrier(b, this.M.conc, 6.2, 0, 56 + i * 3.5, -0.02);
+    for (let i = 0; i < 5; i++) {
+      P.jerseyBarrier(b, this.M.conc, -6.2, 0, 26 + i * 3.5, 0.02);
+      this._contact(-6.2, 26 + i * 3.5, 0.9, 2.2, 0.02, 0.66, 0.45, 0.05);
+    }
+    for (let i = 0; i < 4; i++) {
+      P.jerseyBarrier(b, this.M.conc, 6.2, 0, 56 + i * 3.5, -0.02);
+      this._contact(6.2, 56 + i * 3.5, 0.9, 2.2, -0.02, 0.66, 0.45, 0.05);
+    }
     P.hesco(b, this.M.bag, this.M.rust, 8.2, PAVE_Y, 30.0, 5.0, 0);
     P.hesco(b, this.M.bag, this.M.rust, -8.4, PAVE_Y, 12.0, 4.0, 0);
 
     // Vehicle chicane south of the gatehouse: barriers stepping across the road
     // from alternating kerbs. It slows the approach and reads as a checkpoint
     // without standing a 6 m box in front of the level's hero silhouette.
-    for (let i = 0; i < 4; i++) P.jerseyBarrier(b, this.M.conc, -6.4 + i * 0.9, 0, 57.5 + i * 3.4, Math.PI / 2 - 0.25);
-    for (let i = 0; i < 4; i++) P.jerseyBarrier(b, this.M.conc, 6.4 - i * 0.9, 0, 59.5 + i * 3.4, Math.PI / 2 + 0.25);
+    for (let i = 0; i < 4; i++) {
+      P.jerseyBarrier(b, this.M.conc, -6.4 + i * 0.9, 0, 57.5 + i * 3.4, Math.PI / 2 - 0.25);
+      this._contact(-6.4 + i * 0.9, 57.5 + i * 3.4, 2.2, 0.9, Math.PI / 2 - 0.25, 0.64, 0.5, 0.05);
+      this._chip(-6.4 + i * 0.9 + 1.0, 0.25, 57.5 + i * 3.4, 3, 0.8);
+    }
+    for (let i = 0; i < 4; i++) {
+      P.jerseyBarrier(b, this.M.conc, 6.4 - i * 0.9, 0, 59.5 + i * 3.4, Math.PI / 2 + 0.25);
+      this._contact(6.4 - i * 0.9, 59.5 + i * 3.4, 2.2, 0.9, Math.PI / 2 + 0.25, 0.64, 0.5, 0.05);
+    }
     this._container(this.M.cRed, 9.0, PAVE_Y, 55.0, 0.04);
     this._cover(7.6, 55.0); this._cover(-5.6, 58.0); this._cover(5.6, 60.0);
 

@@ -211,15 +211,35 @@ export function stall(b, wood, tarp, crate, x, y, z, rotY, w = 2.6, d = 1.8, rng
 }
 
 /** Awning bolted to a facade. */
-export function awning(b, tarp, metal, x, y, z, w, proj, rotY) {
+export function awning(b, tarp, metal, x, y, z, w, proj, rotY, rng) {
+  const r = rng || (() => 0.5);
   const c = Math.cos(rotY), s = Math.sin(rotY);
-  b.shape(tarp, new THREE.BoxGeometry(w, 0.06, proj),
-    { x: x + s * 0 + c * 0, y, z }, { x: 0.22, y: rotY, z: 0 }, { x: 1, y: 1, z: 1 },
-    { collide: false, uvScale: [w / 2, proj / 2] });
+  // Three panels across the span rather than one flat slab. Cloth stretched
+  // between two bearers sags in the middle and the free edge droops; a
+  // dimensionally perfect awning is one of the loudest tells in the frame.
+  const nSeg = 3;
+  for (let i = 0; i < nSeg; i++) {
+    const t = (i + 0.5) / nSeg;
+    const off = (t - 0.5) * w;
+    const sag = Math.sin(t * Math.PI) * (0.05 + r() * 0.055);
+    b.shape(tarp, new THREE.BoxGeometry(w / nSeg + 0.03, 0.05, proj),
+      { x: x + c * off, y: y - sag, z: z - s * off },
+      { x: 0.22 + sag * 0.9, y: rotY, z: (r() - 0.5) * 0.05 }, { x: 1, y: 1, z: 1 },
+      { collide: false, uvScale: [w / nSeg / 2, proj / 2] });
+  }
   for (const o of [-w / 2 + 0.15, w / 2 - 0.15]) {
     b.box(metal, x + c * o, y - 0.24, z - s * o, 0.05, 0.05, proj, rotY, { collide: false });
   }
-  b.box(tarp, x, y - 0.28, z + Math.cos(rotY) * (proj / 2), w, 0.4, 0.03, rotY, { collide: false });
+  // Valance, hanging unevenly.
+  for (let i = 0; i < nSeg; i++) {
+    const t = (i + 0.5) / nSeg;
+    const off = (t - 0.5) * w;
+    const drop = 0.34 + r() * 0.16;
+    b.shape(tarp, new THREE.BoxGeometry(w / nSeg + 0.02, drop, 0.03),
+      { x: x + c * off + s * (proj / 2), y: y - 0.3 - drop / 2, z: z - s * off + c * (proj / 2) },
+      { x: 0, y: rotY, z: (r() - 0.5) * 0.07 }, { x: 1, y: 1, z: 1 },
+      { collide: false, uvScale: [w / nSeg / 1.6, drop / 1.6] });
+  }
 }
 
 /** Hanging laundry line — reads instantly as "people lived here". */
