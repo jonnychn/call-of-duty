@@ -50,6 +50,14 @@ const KEEP_CLEAR = [
   [-24, -10.3], [-2, 86], [27.5, 58], [0, 40], [-17, 8], [23, 50], [2, 96],
 ];
 
+/**
+ * Global scale on every grime/contact darkening in the level. All the stain
+ * calls below are authored at strength 1; this is the one knob to turn if the
+ * whole set reads too sooty or too clean, and it exists so tuning does not mean
+ * touching two hundred literals.
+ */
+const GRIME = 0.85;
+
 const ROAD_HALF = 7.0;      // asphalt half-width
 const KERB = 10.4;          // facade line / back of pavement
 const PAVE_Y = 0.17;        // pavement top
@@ -190,12 +198,15 @@ export class Level {
    * deliberate: the trim then correctly occludes the stain from above, which is
    * how a dirt run actually starts.
    */
+  _g(d) { return 1 - (1 - d) * GRIME; }
+
   _stain(axis, p, out, c, yTop, h, w, topDark, botDark, mat) {
     if (h <= 0.02 || w <= 0.02) return;
     const q = p + out * 0.02;
     const yb = yTop - h;
     const m = mat || this.M.grime;
-    const cols = [topDark, topDark, botDark, botDark];
+    const td = this._g(topDark), bd = this._g(botDark);
+    const cols = [td, td, bd, bd];
     if (axis === 'x') {
       this.b.quad(m, [c - w / 2, yTop, q], [c + w / 2, yTop, q], [c + w / 2, yb, q], [c - w / 2, yb, q],
         cols, w / 2.1, h / 3.4);
@@ -209,8 +220,9 @@ export class Level {
   _soffit(x, y, z, w, d, rotY = 0, dark = 0.6) {
     const c = Math.cos(rotY), s = Math.sin(rotY);
     const L = (u, v) => [x + u * c - v * s, y, z + u * s + v * c];
+    const k = this._g(dark);
     this.b.quad(this.M.ao, L(-w / 2, -d / 2), L(w / 2, -d / 2), L(w / 2, d / 2), L(-w / 2, d / 2),
-      [dark, dark, dark, dark], w / 1.5, d / 1.5);
+      [k, k, k, k], w / 1.5, d / 1.5);
   }
 
   /**
@@ -221,6 +233,7 @@ export class Level {
    */
   _contact(x, z, w, d, rotY = 0, dark = 0.74, reach = 0.7, y = 0.025) {
     const b = this.b;
+    dark = this._g(dark);
     const cs = Math.cos(rotY), sn = Math.sin(rotY);
     const L = (u, v) => [x + u * cs - v * sn, y, z + u * sn + v * cs];
     const hw = w / 2, hd = d / 2, r = reach;
@@ -233,6 +246,7 @@ export class Level {
 
   /** Contact darkening along one straight run of wall base. */
   _contactRun(axis, p, out, a0, a1, dark = 0.68, reach = 0.85, y = 0.03) {
+    dark = this._g(dark);
     const q0 = p + out * 0.02, q1 = p + out * (0.02 + reach);
     if (axis === 'x') {
       this.b.quad(this.M.ao, [a0, y, q0], [a1, y, q0], [a1, y, q1], [a0, y, q1],
@@ -588,7 +602,12 @@ export class Level {
     };
     for (let i = 0; i <= n; i++) {
       const c = a0 + step * i;
-      put(c, pierW, 0, clear, mat, depth);
+      // Masonry piers built by hand and settled for fifty years are not plumb.
+      // The lean is under a degree — enough to break the run of identical
+      // verticals, not enough to look like a mistake.
+      const lean = (R() - 0.5) * 0.016;
+      if (axis === 'z') b.tilted(mat, p, 0, c, depth, clear, pierW, { x: lean, y: 0, z: (R() - 0.5) * 0.014 });
+      else b.tilted(mat, c, 0, p, pierW, clear, depth, { x: lean, y: 0, z: (R() - 0.5) * 0.014 });
       put(c, pierW + 0.24, 0, 0.5, this.M.brick, depth + 0.24);          // pier base
       put(c, pierW + 0.2, clear - 0.28, 0.28, this.M.concF, depth + 0.2); // impost
       // Piers are the closest architecture the player walks past. Ground them
@@ -774,6 +793,18 @@ export class Level {
       for (let z = Z0; z < Z1; z += 2.4) {
         b.box(this.M.conc, s * (ROAD_HALF - 0.09), PAVE_Y - 0.02, z, 0.2, 0.03, 0.06, 0, { collide: false });
       }
+      // Kerbs take more damage than anything else in a street. Every few metres
+      // one is knocked back to a broken stub — the run then reads as laid, not
+      // as one extruded rail.
+      for (let z = Z0 + 3; z < Z1; z += 7 + R() * 6) {
+        this._chip(s * (ROAD_HALF - 0.06), PAVE_Y - 0.03, z, 3 + Math.floor(R() * 3), 0.8);
+        if (R() < 0.4) {
+          b.tilted(this.M.conc, s * (ROAD_HALF - 0.1), PAVE_Y - 0.09, z + 0.6, 0.34, 0.16, 0.7,
+            { x: (R() - 0.5) * 0.2, y: (R() - 0.5) * 0.25, z: (R() - 0.5) * 0.2 }, { collide: false, shadow: false });
+        }
+      }
+      // Grime line where the kerb face meets the asphalt.
+      this._contactRun('z', s * (ROAD_HALF - 0.02), -s, Z0, Z1, 0.72, 0.55, 0.056);
     }
 
     // Broken centre line + edge lines. A corridor level lives or dies on its
@@ -937,6 +968,22 @@ export class Level {
     b.box(this.M.concF, hx + 0.4, 0.09, hz - 0.3, 1.9, 0.34, 1.5, 0.4);
     // Blown-in render and a cracked-open patch of blockwork on the side wall.
     b.box(this.M.brick, x0 + 0.06, 1.1, z1 - 2.6, 0.1, 1.8, 2.4, 0, { collide: false });
+
+    // Interior grime. A room lit through one big opening has a strong gradient
+    // of its own: the ceiling and the corners away from the light go very dark,
+    // and the walls are filthy where furniture and hands have been.
+    this._soffit(x0 + (x1 - x0) / 2, 3.04, cz, x1 - x0 - 0.2, z1 - z0 - 0.2, 0, 0.52);
+    for (const s of [-1, 1]) {
+      this._stain('x', s > 0 ? z1 - 0.24 : z0 + 0.24, -s, (x0 + x1) / 2, 3.02, 1.5, x1 - x0, 0.50, 1.0);
+      this._stain('x', s > 0 ? z1 - 0.24 : z0 + 0.24, -s, (x0 + x1) / 2, 1.0, 1.0, x1 - x0, 1.0, 0.54);
+    }
+    this._stain('z', x0 + 0.24, 1, cz, 3.02, 1.6, z1 - z0, 0.46, 1.0);
+    this._stain('z', x0 + 0.24, 1, cz, 1.1, 1.1, z1 - z0, 1.0, 0.50);
+    // The slab of daylight from the shopfront stops at the partition; behind it
+    // is the darkest place a player can stand at ground level in this level.
+    this.b.quad(this.M.ao, [x0 + 0.3, 0.1, z0 + 0.3], [x0 + 3.1, 0.1, z0 + 0.3],
+      [x0 + 3.1, 0.1, z1 - 0.3], [x0 + 0.3, 0.1, z1 - 0.3],
+      [this._g(0.5), this._g(0.5), this._g(0.5), this._g(0.5)], 2, 7);
 
     // Steel roller shutter half-open over the shopfront.
     b.box(this.M.rust, -10.55, 2.35, 28.4, 0.14, 0.42, 3.7, 0, { collide: false });
@@ -1234,7 +1281,7 @@ export class Level {
       b.aabb(this.M.brick, hw, y, z0 - 0.22, hw + 0.65, y + sh, z0, { collide: false });
       // The intrados is a tunnel soffit: it gets almost no sky and should be the
       // darkest surface in the hero frame, not the same cream as the sunlit face.
-      const iv = 0.42 + 0.34 * (hw / r);
+      const iv = this._g(0.42 + 0.34 * (hw / r));
       for (const s of [-1, 1]) {
         const xq = s * (hw - 0.02);
         b.quad(this.M.ao, [xq, y, z0], [xq, y, z1], [xq, y + sh, z1], [xq, y + sh, z0],
@@ -1324,7 +1371,7 @@ export class Level {
     // A dirty apron of road under and just outside the arch: the passage floor
     // never gets rained on, so it holds a different, darker tone.
     b.quad(this.M.ao, [-r, 0.062, z0 - 1.2], [r, 0.062, z0 - 1.2], [r, 0.062, z1 + 1.2], [-r, 0.062, z1 + 1.2],
-      [0.93, 0.93, 0.78, 0.78], 9, 6);
+      [this._g(0.93), this._g(0.93), this._g(0.78), this._g(0.78)], 9, 6);
 
     // Blast damage: the west pier has taken a hit.
     b.box(this.M.dark, -r - 1.6, 0, z0 - 0.15, 2.6, 3.2, 0.35, 0.05, { collide: false });
@@ -1563,7 +1610,16 @@ export class Level {
       // Cable run and a conduit box, stapled across the render.
       at(c + 1.0, 0.08, 2.6, 3.6, 0.05, 0.05, this.M.wire, N);
       at(c + 1.0, 0.08, 2.62, 0.05, 0.5, 0.05, this.M.wire, N);
+      // This is the one facade the review camera stands 3.7 m from, so the wear
+      // has to survive a close read: a run down the drainpipe line, a stain
+      // spreading from the spalled patch, and the splash zone at the base.
+      this._stain(axis, p, out, c, 8.4, 6.4, 0.42, 0.50, 1.0);
+      this._stain(axis, p, out, c + 1.9, 1.34, 1.0, 0.55, 0.62, 1.0);
+      this._chip(axis === 'z' ? p + out * 0.1 : c + 2.0, 0.05, axis === 'z' ? c + 2.0 : p + out * 0.1, 4, 1.0);
     }
+    this._stain(axis, p, out, (a0 + a1) / 2, 1.25, 1.25, a1 - a0, 1.0, 0.52);
+    this._stain(axis, p, out, (a0 + a1) / 2, 7.4, 7.4, a1 - a0, 1.0, 0.78);
+    this._contactRun(axis, p, out, a0, a1, 0.58, 0.9, 0.04);
     // Kerb-level rubbish and grit drift the whole length.
     for (let i = 0; i < 60; i++) {
       const c = a0 + R() * (a1 - a0), dp = 0.2 + R() * 0.9, sz = 0.08 + R() * 0.26;

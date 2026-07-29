@@ -66,7 +66,10 @@ export function streakTexture(size = 256) {
 
   const tex = new THREE.CanvasTexture(cv);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  // This is a multiplier mask, not a colour. Tagging it sRGB would have the
+  // renderer decode it to linear, squaring the darkening: a 0.6 streak would
+  // land at 0.32 and every stain in the level would read as soot.
+  tex.colorSpace = THREE.NoColorSpace;
   tex.anisotropy = 4;
   return tex;
 }
@@ -95,7 +98,10 @@ export function blotchTexture(size = 128) {
   }
   const tex = new THREE.CanvasTexture(cv);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  // This is a multiplier mask, not a colour. Tagging it sRGB would have the
+  // renderer decode it to linear, squaring the darkening: a 0.6 streak would
+  // land at 0.32 and every stain in the level would read as soot.
+  tex.colorSpace = THREE.NoColorSpace;
   return tex;
 }
 
@@ -110,7 +116,15 @@ export function grimeMaterial(name, tex) {
     map: tex,
     vertexColors: true,
     transparent: true,
-    blending: THREE.MultiplyBlending,
+    // Explicit factors rather than THREE.MultiplyBlending. The stock preset
+    // assumes premultiplied alpha and warns once per material per frame if it
+    // does not get it, and this layer has no meaningful alpha at all — the
+    // fade-out lives in the vertex colour. ZERO * src + SRC_COLOR * dst is
+    // exactly `dst *= src.rgb`: an albedo modulator with nothing assumed.
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.ZeroFactor,
+    blendDst: THREE.SrcColorFactor,
+    blendEquation: THREE.AddEquation,
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
