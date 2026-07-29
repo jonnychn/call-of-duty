@@ -88,19 +88,42 @@ export class GeometryBuilder {
     return this._fallbacks.get(name);
   }
 
-  _bucket(mat, collide) {
-    return { mat, collide };
+  /**
+   * A tinted variant of an existing library surface. Cheaper and far better
+   * looking than a flat colour: the maps (and therefore the normal, roughness
+   * and AO detail) are shared, only the base colour multiplier differs. Used
+   * for charred metal, hessian sandbags and sun-bleached cloth, none of which
+   * warrant their own texture bake.
+   */
+  tinted(name, source, color, opts) {
+    if (this._fallbacks.has(name)) return this._fallbacks.get(name);
+    const src = this.materials.materials[source];
+    let m;
+    if (src) {
+      m = src.clone();
+      m.color = new THREE.Color(color);
+      if (opts?.roughness !== undefined) m.roughness = opts.roughness;
+      if (opts?.metalness !== undefined) m.metalness = opts.metalness;
+      if (opts?.side) m.side = opts.side;
+      m.userData.tile = opts?.tile ?? src.userData.tile ?? 2;
+    } else {
+      m = new THREE.MeshStandardMaterial({ color, roughness: opts?.roughness ?? 0.92, side: opts?.side ?? THREE.FrontSide });
+      m.userData.tile = opts?.tile ?? 2;
+    }
+    m.name = name;
+    this._fallbacks.set(name, m);
+    return m;
   }
 
-  _key(mat, collide, x, z) {
+  _key(mat, collide, hidden, x, z) {
     const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
-    return `${mat.name || mat.uuid}|${collide ? 'c' : 'n'}|${cx},${cz}`;
+    return `${mat.name || mat.uuid}|${collide ? 'c' : 'n'}${hidden ? 'h' : ''}|${cx},${cz}`;
   }
 
-  _push(mat, geo, collide, x, z) {
-    const key = this._key(mat, collide, x, z);
+  _push(mat, geo, collide, x, z, hidden) {
+    const key = this._key(mat, collide, hidden, x, z);
     let b = this.buckets.get(key);
-    if (!b) { b = { mat, geos: [], collide }; this.buckets.set(key, b); }
+    if (!b) { b = { mat, geos: [], collide, hidden }; this.buckets.set(key, b); }
     b.geos.push(geo);
   }
 
@@ -121,7 +144,7 @@ export class GeometryBuilder {
     }
     g.applyMatrix4(this._m4);
     this.stats.boxes++;
-    this._push(mat, g, opts?.collide !== false, x, z);
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true);
   }
 
   /** Box specified by min/max corners. */
@@ -142,18 +165,23 @@ export class GeometryBuilder {
       new THREE.Vector3(scale?.x ?? 1, scale?.y ?? 1, scale?.z ?? 1),
     );
     g.applyMatrix4(this._m4);
-    this._push(mat, g, opts?.collide !== false, position.x, position.z);
+    this._push(mat, g, opts?.collide !== false, position.x, position.z, opts?.hidden === true);
   }
 
-  /** Horizontal quad (floors, road, decals) at height y. */
+  /**
+   * Horizontal quad (floors, road, decals) at height y. `opts.uv` overrides the
+   * world-projected scaling — needed for surfaces like road markings whose
+   * texture is a single non-tiling motif across the U axis.
+   */
   plane(mat, x, y, z, w, d, rotY = 0, opts) {
     const tile = mat.userData.tile ?? 2;
     const g = new THREE.PlaneGeometry(w, d);
-    scaleUv(g, w / tile, d / tile);
+    if (opts?.uv) scaleUv(g, opts.uv[0], opts.uv[1]);
+    else scaleUv(g, w / tile, d / tile);
     g.rotateX(-Math.PI / 2);
     if (rotY) g.rotateY(rotY);
     g.translate(x, y, z);
-    this._push(mat, g, opts?.collide !== false, x, z);
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true);
   }
 
   /**
@@ -161,7 +189,7 @@ export class GeometryBuilder {
    * COLLISION_LAYER enabled; non-collidable ones are flagged noCollide.
    */
   emit(root, collisionLayer) {
-    let meshes = 0, tris = 0;
+    let meshes = 0, tris = 0, collidableTris = 0;
     for (const [key, b] of this.buckets) {
       if (!b.geos.length) continue;
       const merged = mergeGeometries(b.geos, false);
@@ -174,13 +202,18 @@ export class GeometryBuilder {
       mesh.receiveShadow = true;
       if (b.collide) mesh.layers.enable(collisionLayer);
       else mesh.userData.noCollide = true;
+      // Invisible blockers: collision-only volumes that keep the player inside
+      // the level without adding a slab of visible geometry behind the set.
+      if (b.hidden) { mesh.visible = false; mesh.castShadow = false; mesh.receiveShadow = false; }
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrixWorld();
       root.add(mesh);
       meshes++;
-      tris += (merged.index ? merged.index.count : merged.attributes.position.count) / 3;
+      const t = (merged.index ? merged.index.count : merged.attributes.position.count) / 3;
+      tris += t;
+      if (b.collide) collidableTris += t;
     }
     this.buckets.clear();
-    return { meshes, tris, boxes: this.stats.boxes };
+    return { meshes, tris, collidableTris, boxes: this.stats.boxes };
   }
 }

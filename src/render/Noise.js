@@ -218,6 +218,34 @@ export function worleyCell(x, y, period, seed, out) {
   return out;
 }
 
+/**
+ * Single-cell scattered points: one jittered point per grid cell, jitter
+ * confined to the middle half of the cell so any feature with a radius up to
+ * a quarter of a cell is guaranteed to lie inside it.
+ *
+ * That constraint is what lets this skip the 3×3 neighbourhood a real Worley
+ * lookup needs, which makes it roughly nine times cheaper. For *scattered*
+ * features — blowholes, pebbles, specks, rivets — that is all we ever needed;
+ * full Worley is only required when the cells have to partition the plane.
+ * out = [distance, cellRandom, dx, dy]
+ */
+export function scatter2(x, y, period, seed, out) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const wx = ((xi % period) + period) % period;
+  const wy = ((yi % period) + period) % period;
+  let h = (Math.imul(wx, 73856093) ^ Math.imul(wy, 19349663) ^ Math.imul(seed, 83492791)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  const rx = 0.25 + (h & 0x7ff) * (0.5 / 2048);
+  const ry = 0.25 + ((h >>> 11) & 0x7ff) * (0.5 / 2048);
+  const dx = x - xi - rx, dy = y - yi - ry;
+  out[0] = Math.sqrt(dx * dx + dy * dy);
+  out[1] = ((h >>> 22) & 0x3ff) * (1 / 1024);
+  out[2] = dx; out[3] = dy;
+  return out;
+}
+
 /** Distance to the nearest Worley cell *edge* — clean mortar lines, crazing. */
 export function worleyEdge(x, y, period, seed) {
   const w = worley2(x, y, period, seed);

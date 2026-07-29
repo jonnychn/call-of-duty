@@ -76,19 +76,22 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   // opaque black disc — the one thing a red dot must never be.
   b.add(M.opticBody, gTube(tube + 0.0028, tube - 0.0026, 0.0075, 24, 0, y, z - len / 2 + 0.004));
   b.add(M.opticBody, gTube(tube + 0.0028, tube - 0.0026, 0.0075, 24, 0, y, z + len / 2 - 0.004));
-  b.add(M.opticBody, gChamfer(0.0235, 0.0165, 0.030, 0, y - 0.0035, z + 0.004, 0, 0, 0, 0.0012));
+  // Turret boss. This has to sit strictly BELOW the bore: a box across the
+  // tube centre is invisible from outside and blacks out the bottom half of
+  // the sight picture the moment the player aims.
+  b.add(M.opticBody, gChamfer(0.0235, 0.0130, 0.030, 0, y - tube - 0.0052, z + 0.004, 0, 0, 0, 0.0012));
   // Turrets: elevation on top, windage on the right, both capped and knurled.
-  for (const [ax, px, py] of [['y', 0, y + tube + 0.004], ['x', tube + 0.004, y]]) {
-    b.add(M.opticBody, gRod(0.0072, 0.011, 14, px, py, z + 0.004, ax));
-    b.add(M.alu, gRod(0.0058, 0.004, 14, ax === 'y' ? 0 : px + 0.007, ax === 'y' ? py + 0.007 : py, z + 0.004, ax));
+  for (const [ax, px, py] of [['y', 0, y + tube + 0.0062], ['x', tube + 0.0062, y]]) {
+    b.add(M.opticBody, gRod(0.0072, 0.013, 14, px, py, z + 0.004, ax));
+    b.add(M.alu, gRod(0.0058, 0.004, 14, ax === 'y' ? 0 : px + 0.008, ax === 'y' ? py + 0.008 : py, z + 0.004, ax));
     for (let i = 0; i < 12; i++) {
       const a = (i / 12) * TAU;
       const rr = 0.0072;
-      if (ax === 'y') b.add(M.opticBody, gBox(0.0008, 0.011, 0.0016, Math.cos(a) * rr, py, z + 0.004 + Math.sin(a) * rr, 0, -a, 0));
+      if (ax === 'y') b.add(M.opticBody, gBox(0.0008, 0.013, 0.0016, Math.cos(a) * rr, py, z + 0.004 + Math.sin(a) * rr, 0, -a, 0));
     }
   }
-  // Battery compartment on the left.
-  b.add(M.opticBody, gRod(0.0068, 0.010, 14, -tube - 0.004, y, z + 0.004, 'x'));
+  // Battery compartment on the left, also clear of the bore.
+  b.add(M.opticBody, gRod(0.0068, 0.011, 14, -tube - 0.0055, y, z + 0.004, 'x'));
   // Mount: quick-detach throw lever clamp.
   b.add(M.opticBody, gChamfer(0.0245, 0.021, 0.044, 0, y - 0.0245, z + 0.002, 0, 0, 0, 0.0012));
   b.add(M.alu, gChamfer(0.0325, 0.0075, 0.050, 0, y - 0.0345, z + 0.002, 0, 0, 0, 0.0010));
@@ -102,64 +105,95 @@ function redDot(M, { y, z, tube = 0.0158 }) {
   b.flush(g, 'optic');
 
   // ---- glass -------------------------------------------------------------
-  // Objective lens: a shallow spherical cap with a strong blue-violet coating.
+  // Flat discs, not spherical caps: at 20 mm the curvature is invisible and a
+  // cap is very easy to build inside-out or squashed. What sells glass here is
+  // the coating tint plus a grazing-angle sheen, not the profile.
+  //
+  // The tint is deliberately light. A red dot the player has to see *through*
+  // may not eat more than a fraction of a stop of the world behind it.
+  const aperture = tube - 0.0028;
   const lensMat = new THREE.MeshPhysicalMaterial({
     name: 'lens',
-    color: 0x0c1a2c, roughness: 0.04, metalness: 0.35,
-    transparent: true, opacity: 0.34, envMapIntensity: 3.2,
+    color: 0x16283e, roughness: 0.03, metalness: 0.0,
+    transparent: true, opacity: 0.15, envMapIntensity: 2.4,
     clearcoat: 1.0, clearcoatRoughness: 0.02,
     depthWrite: false, side: THREE.DoubleSide,
   });
-  const capGeo = new THREE.SphereGeometry(0.055, 20, 8, 0, TAU, 0, 0.28);
-  capGeo.scale(1, 1, 0.42);
-  capGeo.rotateX(-Math.PI / 2);
-  const front = new THREE.Mesh(capGeo.clone(), lensMat);
+  const lensGeo = new THREE.CircleGeometry(aperture, 28);
+  const front = new THREE.Mesh(lensGeo, lensMat);
   front.position.set(0, y, z - len / 2 + 0.010);
   front.renderOrder = 4;
   g.add(front);
-  const rear = new THREE.Mesh(capGeo.clone().rotateX(Math.PI), lensMat);
+  const rear = new THREE.Mesh(lensGeo, lensMat);
   rear.position.set(0, y, z + len / 2 - 0.010);
   rear.renderOrder = 4;
   g.add(rear);
 
-  // Coating flare: an additive ring that catches the key light like AR glass.
-  const flareMat = new THREE.MeshBasicMaterial({
-    color: 0x2f6bd0, transparent: true, opacity: 0.16,
+  // Coating sheen: an additive ring, brightest at the rim, which is where a
+  // real AR coating flares. Built as a vertex-coloured ring so it costs one
+  // draw call and needs no texture.
+  const ringGeo = new THREE.RingGeometry(aperture * 0.45, aperture, 28, 1);
+  {
+    const c = ringGeo.attributes.position;
+    const col = new Float32Array(c.count * 3);
+    for (let i = 0; i < c.count; i++) {
+      const r = Math.hypot(c.getX(i), c.getY(i)) / aperture;
+      const k = Math.pow(THREE.MathUtils.clamp((r - 0.45) / 0.55, 0, 1), 2.0);
+      col[i * 3] = 0.16 * k; col[i * 3 + 1] = 0.34 * k; col[i * 3 + 2] = 0.85 * k;
+    }
+    ringGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+  const flare = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-  });
-  const flare = new THREE.Mesh(new THREE.CircleGeometry(tube - 0.0028, 24), flareMat);
-  flare.position.set(0, y, z - len / 2 + 0.013);
+  }));
+  flare.position.set(0, y, z - len / 2 + 0.0125);
   flare.renderOrder = 5;
   g.add(flare);
 
   // ---- reticle -----------------------------------------------------------
-  // Emissive well above 1.0 so bloom picks it up and it survives ACES.
+  // Emissive well above 1.0 so it survives the filmic curve and blooms. The
+  // dot, its halo and the glass wash are three separate additive layers,
+  // which is what makes an emitter read as a light source rather than a decal.
   const dotMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(9.0, 0.55, 0.18),
+    color: new THREE.Color(14.0, 1.1, 0.35),
     transparent: true, blending: THREE.AdditiveBlending,
-    depthWrite: false, depthTest: true, toneMapped: true,
+    depthWrite: false, depthTest: false, toneMapped: true,
   });
   const reticle = new THREE.Group();
   reticle.name = 'reticle';
-  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.00085, 16), dotMat);
+  // 2 MOA at this scale, plus a soft bloom disc an order of magnitude wider.
+  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.0011, 18), dotMat);
+  dot.position.z = 0.0012;
   reticle.add(dot);
   const haloMat = dotMat.clone();
-  haloMat.color = new THREE.Color(2.2, 0.14, 0.05);
+  haloMat.color = new THREE.Color(3.0, 0.20, 0.06);
   haloMat.opacity = 0.55;
-  const halo = new THREE.Mesh(new THREE.CircleGeometry(0.0034, 20), haloMat);
-  halo.position.z = 0.0004;
+  const halo = new THREE.Mesh(new THREE.CircleGeometry(0.0040, 24), haloMat);
+  halo.position.z = 0.0008;
   reticle.add(halo);
-  // Faint red wash on the glass — the light the emitter throws on the coating.
-  const washMat = dotMat.clone();
-  washMat.color = new THREE.Color(0.45, 0.045, 0.02);
-  washMat.opacity = 0.5;
-  const wash = new THREE.Mesh(new THREE.CircleGeometry(tube - 0.003, 20), washMat);
-  wash.position.z = 0.0008;
-  reticle.add(wash);
+  // Faint red wash across the glass — the light the emitter throws back onto
+  // the coating. Falls off from the centre so it never looks like a flat card.
+  const washGeo = new THREE.CircleGeometry(aperture, 28);
+  {
+    const c = washGeo.attributes.position;
+    const col = new Float32Array(c.count * 3);
+    for (let i = 0; i < c.count; i++) {
+      const r = Math.hypot(c.getX(i), c.getY(i)) / aperture;
+      const k = Math.pow(1 - r, 2.2);
+      col[i * 3] = 0.55 * k; col[i * 3 + 1] = 0.05 * k; col[i * 3 + 2] = 0.02 * k;
+    }
+    washGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  }
+  const washMat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.5,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false,
+  });
+  reticle.add(new THREE.Mesh(washGeo, washMat));
   // The reticle floats at the *front* lens: that is what gives the parallax
   // you expect when your head moves off-axis.
-  reticle.position.set(0, y, z - len / 2 + 0.014);
-  reticle.renderOrder = 6;
+  reticle.position.set(0, y, z - len / 2 + 0.011);
+  reticle.renderOrder = 20;
   g.add(reticle);
 
   g.userData.reticle = reticle;

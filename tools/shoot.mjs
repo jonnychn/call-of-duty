@@ -56,6 +56,13 @@ const POSES = {
   alleyDeep:   { pos: [-24, 1.6, -11.5], yaw: 270, pitch: 0 },  // alley toward the street
   minaret:     { pos: [-2, 1.6, 86], yaw: 165, pitch: 14 },     // far quarter landmark
   terrace:     { pos: [27.5, 7.0, 58], yaw: 215, pitch: -6 },   // courtyard terrace
+
+  // --- weapon poses -------------------------------------------------------
+  wpnHip:      { pos: [0, 1.6, 44], yaw: 178, pitch: 0 },        // hip framing
+  wpnAds:      { pos: [0, 1.6, 44], yaw: 178, pitch: 0, ads: true },
+  wpnSky:      { pos: [0, 1.6, 44], yaw: 178, pitch: 26 },       // clean sky backdrop
+  wpnSkyAds:   { pos: [0, 1.6, 44], yaw: 178, pitch: 26, ads: true },
+  wpnDark:     { pos: [-13.5, 1.6, 28.6], yaw: 110, pitch: -2 }, // interior, low light
 };
 
 const SHOT_SETS = {

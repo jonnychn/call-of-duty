@@ -3,3 +3,7 @@ dist/
 shots/
 review/
 *.log
+
+# agent scratch scripts
+*.tmp.mjs
+.*-measure.mjs

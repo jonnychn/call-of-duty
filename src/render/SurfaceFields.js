@@ -87,27 +87,38 @@ export function downsample(src, size, factor) {
   return out;
 }
 
-/** Separable wrapping box blur, in place-safe. Radius in texels. */
+/**
+ * Separable wrapping box blur. Radius in texels.
+ *
+ * The wrap indices are precomputed into a table rather than recomputed with a
+ * double modulo per sample: at 1024² this loop runs eight million times per
+ * bake and the modulo was costing more than the blur itself.
+ */
 export function blurWrap(src, size, radius) {
   const r = Math.max(1, radius | 0);
   const tmp = new Float32Array(size * size);
   const out = new Float32Array(size * size);
   const inv = 1 / (2 * r + 1);
+  // idx[k] maps k in [-size, 2*size) to a wrapped index
+  const idx = new Int32Array(size * 3);
+  for (let k = 0; k < size * 3; k++) idx[k] = (k - size) % size < 0 ? ((k - size) % size) + size : (k - size) % size;
+  const W = (k) => idx[k + size];
+
   for (let y = 0; y < size; y++) {
     const row = y * size;
     let acc = 0;
-    for (let k = -r; k <= r; k++) acc += src[row + wrap(k, size)];
+    for (let k = -r; k <= r; k++) acc += src[row + W(k)];
     for (let x = 0; x < size; x++) {
       tmp[row + x] = acc * inv;
-      acc += src[row + wrap(x + r + 1, size)] - src[row + wrap(x - r, size)];
+      acc += src[row + W(x + r + 1)] - src[row + W(x - r)];
     }
   }
   for (let x = 0; x < size; x++) {
     let acc = 0;
-    for (let k = -r; k <= r; k++) acc += tmp[wrap(k, size) * size + x];
+    for (let k = -r; k <= r; k++) acc += tmp[W(k) * size + x];
     for (let y = 0; y < size; y++) {
       out[y * size + x] = acc * inv;
-      acc += tmp[wrap(y + r + 1, size) * size + x] - tmp[wrap(y - r, size) * size + x];
+      acc += tmp[W(y + r + 1) * size + x] - tmp[W(y - r) * size + x];
     }
   }
   return out;
@@ -199,24 +210,39 @@ export function horizonAO(height, size, amplitude, tileMeters, opts = {}) {
   const radii = new Float32Array(steps);
   for (let s = 0; s < steps; s++) radii[s] = Math.max(1, Math.round(maxR * Math.pow((s + 1) / steps, 1.7)));
 
+  // Flatten the march into offset tables: a direction/step pair is a fixed
+  // (dx, dy, 1/distance) triple, so the trig and the division come out of the
+  // innermost loop entirely.
+  const TAPS = HAO_DIRS * steps;
+  const offX = new Int32Array(TAPS), offY = new Int32Array(TAPS);
+  const invD = new Float32Array(TAPS);
+  for (let d = 0; d < HAO_DIRS; d++) {
+    for (let s = 0; s < steps; s++) {
+      const r = radii[s], t = d * steps + s;
+      offX[t] = Math.round(DIR_COS[d] * r);
+      offY[t] = Math.round(DIR_SIN[d] * r);
+      invD[t] = 1 / (r * texelM);
+    }
+  }
+  const wrapX = new Int32Array(n * 3);
+  for (let k = 0; k < n * 3; k++) { const m = (k - n) % n; wrapX[k] = m < 0 ? m + n : m; }
+
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
       const h0 = h[y * n + x] * amplitude;
-      let occ = 0;
+      let occ = 0, t = 0;
       for (let d = 0; d < HAO_DIRS; d++) {
-        const cx = DIR_COS[d], cy = DIR_SIN[d];
         let maxSlope = 0;
-        for (let s = 0; s < steps; s++) {
-          const r = radii[s];
-          const sx = wrap(Math.round(x + cx * r), n);
-          const sy = wrap(Math.round(y + cy * r), n);
+        for (let s = 0; s < steps; s++, t++) {
+          const sx = wrapX[x + offX[t] + n];
+          const sy = wrapX[y + offY[t] + n];
           const dh = h[sy * n + sx] * amplitude - h0;
           if (dh > 0) {
-            const slope = dh / (r * texelM);
+            const slope = dh * invD[t];
             if (slope > maxSlope) maxSlope = slope;
           }
         }
-        // sin(atan(m)) — fraction of that direction's hemisphere occluded
+        // sin(atan(m)) — the fraction of that direction's hemisphere occluded
         occ += maxSlope / Math.sqrt(1 + maxSlope * maxSlope);
       }
       ao[y * n + x] = clamp01(1 - (occ / HAO_DIRS) * strength);

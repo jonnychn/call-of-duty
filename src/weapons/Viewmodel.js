@@ -89,6 +89,9 @@ export class Viewmodel {
       R: { pos: new THREE.Vector3(), palm: new THREE.Vector3(), finger: new THREE.Vector3(), curl: 0, thumb: 0, elbow: new THREE.Vector3(), vis: true },
     };
 
+    // The weapon is raised on spawn rather than simply existing.
+    this.startDraw(0.7);
+
     if (typeof window !== 'undefined') window.__viewmodel = this;
   }
 
@@ -124,6 +127,29 @@ export class Viewmodel {
     // just lifts the receiver and the hands for a frame or two.
     this.fireLight = new THREE.PointLight(0xffc98a, 0, 1.2, 2);
     this.fireLight.position.set(0, -0.02, -0.28);
+
+    // Self-shadowing. The world's GTAO pass cannot touch the viewmodel — it
+    // is drawn afterwards over a cleared depth buffer — so without this the
+    // gun has no contact darkening anywhere: no shadow under the optic, none
+    // in the magwell, none where the fingers meet the grip. One 1k shadow map
+    // over a 0.6 m frustum is the cheapest way to get all of it back.
+    this.key.castShadow = true;
+    this.key.shadow.mapSize.set(1024, 1024);
+    this.key.shadow.camera.left = -0.55;
+    this.key.shadow.camera.right = 0.55;
+    this.key.shadow.camera.top = 0.55;
+    this.key.shadow.camera.bottom = -0.55;
+    this.key.shadow.camera.near = 0.02;
+    this.key.shadow.camera.far = 3.0;
+    this.key.shadow.bias = -0.00035;
+    this.key.shadow.normalBias = 0.0022;
+    this.key.shadow.radius = 2.0;
+    // The light must be positioned in the space the weapon actually occupies,
+    // not at unit distance, or the frustum misses it entirely.
+    this.key.position.set(-0.75, 1.05, 0.35).normalize().multiplyScalar(1.3);
+    this.key.target.position.set(0.08, -0.14, -0.35);
+    this.key.position.add(this.key.target.position);
+    this.scene.add(this.key.target);
 
     this.scene.add(this.key, this.fill, this.rim, this.rimLow, this.ambient, this.fireLight);
   }
@@ -503,10 +529,13 @@ export class Viewmodel {
       L.pos.z += (1 - s) * 0.030;
       L.curl = 0.75;
       L.radius = 0.016;
-      if (seat > 0.82 && seat < 0.95) {
-        // The slap. A short sharp impulse on the weapon, not a position jump.
-        this.recoilAngVel.x += 0.9;
-        this.recoilVel.y -= 0.05;
+      // The slap: one sharp impulse the moment the mag locks, not a position
+      // jump and not a force applied every frame it is inside the window.
+      if (seat > 0.84 && !this.clip._slapped) {
+        this.clip._slapped = true;
+        this.recoilAngVel.x += 2.2;
+        this.recoilVel.y -= 0.9;
+        this.recoilVel.z -= 0.25;
       }
     } else if (back > 0) {
       const bq = easeOut(back);

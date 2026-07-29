@@ -20,6 +20,8 @@ export class WeaponSystem {
     this.reloadEnds = 0;
     this.spread = def.spread.hipBase;
     this.shotsFired = 0;
+    this.burst = 0;        // shots since the trigger was last released
+    this.wasFiring = false;
 
     // Camera recoil: an offset added on top of the player's aim that decays.
     this.camRecoil = new THREE.Vector2();
@@ -43,9 +45,13 @@ export class WeaponSystem {
   startReload() {
     if (this.reloading || this.ammo === this.def.magazine || this.reserve <= 0) return;
     this.reloading = true;
-    const dur = this.ammo === 0 ? this.def.reloadEmptyTime : this.def.reloadTime;
+    const empty = this.ammo === 0;
+    const dur = empty ? this.def.reloadEmptyTime : this.def.reloadTime;
     this.reloadEnds = this.time + dur;
-    this.engine.viewmodel.startReload(dur);
+    // The empty reload runs the longer clip: the bolt is locked back, so the
+    // support hand has to come off the mag and rip the charging handle.
+    this.engine.viewmodel.startReload(dur, empty);
+    this.burst = 0;
   }
 
   _finishReload() {
@@ -64,6 +70,15 @@ export class WeaponSystem {
     if (cmd.reload) this.startReload();
 
     const wantFire = def.fireMode === 'auto' ? cmd.firing : cmd.triggerPulled;
+    // Releasing the trigger resets the pattern. Recovery is not instant: a
+    // quick tap-and-retap keeps some of the climb, so tap-firing is a real
+    // trade rather than a free reset.
+    if (!cmd.firing) {
+      if (this.wasFiring) this.lastReleaseTime = this.time;
+      if (this.burst > 0 && this.time - (this.lastReleaseTime ?? 0) > 0.28) this.burst = 0;
+    }
+    this.wasFiring = !!cmd.firing;
+
     if (wantFire && this.canFire()) {
       this.fire(cmd.ads);
     } else if (wantFire && !this.reloading && this.ammo === 0) {
@@ -130,14 +145,20 @@ export class WeaponSystem {
       this.spread + def.spread.growth * (1 - ads * 0.55),
     );
 
-    // Camera kick: mostly up, alternating horizontally so long bursts draw
-    // the characteristic wandering climb instead of a straight vertical line.
-    const sign = (this.shotsFired % 2 === 0) ? 1 : -1;
+    // Camera kick follows the weapon's designed recoil pattern rather than a
+    // coin flip. `burst` counts shots since the trigger was last released, so
+    // the pattern always starts at index 0 on the first round: the first shot
+    // of a burst is dead straight and the climb is repeatable from there.
+    // 15% noise keeps it from feeling like the view is on rails.
+    const pat = def.pattern;
+    const step = pat ? pat[this.burst % pat.length] : [0, 1];
+    const jitter = 1 + (Math.random() - 0.5) * 0.30;
     const scale = 1 - ads * 0.35;
-    this.camRecoilVel.y += THREE.MathUtils.degToRad(def.camKick.pitch) * 24 * scale;
-    this.camRecoilVel.x += THREE.MathUtils.degToRad(def.camKick.yaw) * sign * (0.5 + Math.random()) * 18 * scale;
+    this.camRecoilVel.y += THREE.MathUtils.degToRad(def.camKick.pitch) * step[1] * jitter * 24 * scale;
+    this.camRecoilVel.x += THREE.MathUtils.degToRad(def.camKick.yaw) * step[0] * jitter * 26 * scale;
 
-    this.engine.viewmodel.addRecoil(def);
+    this.engine.viewmodel.addRecoil(def, this.burst);
+    this.burst++;
 
     const isTracer = this.shotsFired % def.tracerEvery === 0;
     this.onFire?.(this._origin, this._dir, isTracer);

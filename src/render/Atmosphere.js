@@ -46,6 +46,8 @@ export const TIME_OF_DAY = {
     fogMie: 2.6, fogMieG: 0.76, fogInscatter: 1.15,
     exposure: 1.45, contrast: 1.16, saturation: 1.06,
     lift: [0.006, 0.010, 0.020], gain: [1.02, 0.99, 1.02],
+    cloudCoverage: 0.52, cloudDensity: 0.90, cloudScale: 0.50, cloudHigh: 0.55,
+    cloudColor: 0xffc6a0, cloudShadow: 0x3f4560,
     bloom: 0.46, godray: 1.15, godrayColor: 0xffb375, flare: 0.55,
   },
 
@@ -64,6 +66,8 @@ export const TIME_OF_DAY = {
     fogMie: 0.9, fogMieG: 0.68, fogInscatter: 0.85,
     exposure: 1.0, contrast: 1.14, saturation: 1.02,
     lift: [0.002, 0.004, 0.010], gain: [1.01, 1.0, 1.0],
+    cloudCoverage: 0.34, cloudDensity: 0.82, cloudScale: 0.60, cloudHigh: 0.32,
+    cloudColor: 0xfdfbf6, cloudShadow: 0x8593ab,
     bloom: 0.26, godray: 0.55, godrayColor: 0xffe9c8, flare: 0.5,
   },
 
@@ -82,6 +86,8 @@ export const TIME_OF_DAY = {
     fogMie: 0.55, fogMieG: 0.62, fogInscatter: 0.7,
     exposure: 0.86, contrast: 1.08, saturation: 0.90,
     lift: [0.004, 0.005, 0.008], gain: [1.0, 1.0, 1.0],
+    cloudCoverage: 0.28, cloudDensity: 0.75, cloudScale: 0.66, cloudHigh: 0.22,
+    cloudColor: 0xffffff, cloudShadow: 0x98a5b6,
     bloom: 0.30, godray: 0.30, godrayColor: 0xfff3e2, flare: 0.35,
   },
 
@@ -100,6 +106,8 @@ export const TIME_OF_DAY = {
     fogMie: 2.0, fogMieG: 0.76, fogInscatter: 1.0,
     exposure: 1.05, contrast: 1.14, saturation: 1.05,
     lift: [0.003, 0.005, 0.013], gain: [1.03, 1.0, 0.96],
+    cloudCoverage: 0.44, cloudDensity: 0.92, cloudScale: 0.52, cloudHigh: 0.46,
+    cloudColor: 0xffe0b8, cloudShadow: 0x64607a,
     bloom: 0.36, godray: 1.0, godrayColor: 0xffc98c, flare: 0.8,
   },
 
@@ -118,6 +126,8 @@ export const TIME_OF_DAY = {
     fogMie: 3.4, fogMieG: 0.80, fogInscatter: 1.25,
     exposure: 1.5, contrast: 1.22, saturation: 1.10,
     lift: [0.004, 0.006, 0.018], gain: [1.05, 0.99, 0.95],
+    cloudCoverage: 0.56, cloudDensity: 0.95, cloudScale: 0.46, cloudHigh: 0.62,
+    cloudColor: 0xffa065, cloudShadow: 0x342d4c,
     bloom: 0.55, godray: 1.5, godrayColor: 0xff9a4e, flare: 1.0,
   },
 
@@ -139,6 +149,8 @@ export const TIME_OF_DAY = {
     fogMie: 1.8, fogMieG: 0.72, fogInscatter: 0.9,
     exposure: 3.6, contrast: 1.26, saturation: 0.86,
     lift: [0.002, 0.005, 0.014], gain: [0.94, 0.98, 1.10],
+    cloudCoverage: 0.36, cloudDensity: 0.72, cloudScale: 0.55, cloudHigh: 0.28,
+    cloudColor: 0x39445e, cloudShadow: 0x0f141f,
     bloom: 0.60, godray: 0.85, godrayColor: 0x9ec0ff, flare: 0.45,
   },
 };
@@ -226,6 +238,12 @@ export class Atmosphere {
     u.moonIntensity.value = p.moonIntensity ?? 0.0;
     u.moonSize.value = p.moonSize ?? 0.5;
     u.groundColor.value.setHex(p.groundColor ?? 0x2a2a2a);
+    u.cloudCoverage.value = p.cloudCoverage ?? 0.4;
+    u.cloudDensity.value = p.cloudDensity ?? 0.85;
+    u.cloudScale.value = p.cloudScale ?? 0.55;
+    u.cloudHigh.value = p.cloudHigh ?? 0.35;
+    u.cloudColor.value.setHex(p.cloudColor ?? 0xffffff);
+    u.cloudShadow.value.setHex(p.cloudShadow ?? 0x8a94a6);
 
     dirFromAngles(this.sunDirection, p.elevation, p.azimuth);
     u.sunPosition.value.copy(this.sunDirection);
@@ -462,6 +480,10 @@ export class Atmosphere {
 
     // Keep the sky box centred on the camera so it never clips.
     this.sky.position.set(camera.position.x, 0, camera.position.z);
+
+    // Very slow cloud drift. Fast enough to feel alive over a firefight,
+    // slow enough that the (unrebuilt) PMREM probe never visibly disagrees.
+    this.sky.material.uniforms.cloudTime.value += 0.0022;
 
     if (--this._scanCountdown <= 0) {
       this._scanCountdown = 20;

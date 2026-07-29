@@ -128,7 +128,7 @@ export function patchAerialPerspective() {
     // the colour of the far haze band; rays pointed up stay closer to the
     // cool zenith tint.
     float upness = dot( aDirView, aUp );
-    vec3 haze = mix( fogColor, aerialHorizonColor, smoothstep( 0.28, -0.10, upness ) );
+    vec3 haze = mix( fogColor, aerialHorizonColor, ( 1.0 - smoothstep( -0.10, 0.28, upness ) ) );
     haze = mix( haze, aerialSunColor, clamp( mie + broad * 0.6, 0.0, 1.0 ) );
     haze *= aerialInscatter;
 

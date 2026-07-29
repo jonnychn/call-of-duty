@@ -61,6 +61,25 @@ async function main() {
     () => window.__engine && window.__engine.running && window.__engine.frame > 5,
     null, { timeout: 300000, polling: 250 });
 
+  // Prove the shadow rig is actually what we think it is before judging pixels.
+  console.log('rig', JSON.stringify(await page.evaluate(() => {
+    const a = window.__engine.atmosphere;
+    const r = window.__engine.renderer;
+    return {
+      csm: !!a.csm,
+      cascades: a.csm ? a.csm.cascades : 0,
+      breaks: a.csm ? a.csm.breaks.map((b) => +b.toFixed(3)) : null,
+      maxFar: a.csm ? a.csm.maxFar : null,
+      cascadeExtent: a.csm ? a.csm.lights.map((l) => +(l.shadow.camera.right * 2).toFixed(1)) : null,
+      shadowMapSize: a.csm ? a.csm.shadowMapSize : a.sun.shadow.mapSize.width,
+      shadowsEnabled: r.shadowMap.enabled,
+      shadowType: r.shadowMap.type,
+      patchedMaterials: a._patched ? a._patched.size : 0,
+      toneMapping: r.toneMapping,
+      env: !!window.__engine.scene.environment,
+    };
+  })));
+
   const written = [];
   for (const tod of TODS) {
     await page.evaluate((t) => window.__engine.atmosphere.apply(t), tod);
@@ -69,13 +88,15 @@ async function main() {
       if (!pose) { console.error('unknown pose', name); continue; }
       await page.evaluate((p) => {
         const e = window.__engine;
+        e.debug.peaceful = true;
+        e.debug.forceAds = !!p.ads;
         e.player.teleport(p.pos[0], p.pos[1] - 1.59, p.pos[2]);
         e.player.yaw = p.yaw * Math.PI / 180;
         e.player.pitch = p.pitch * Math.PI / 180;
-        e.player.ads = p.ads ? 1 : 0;
         e.player.velocity.set(0, 0, 0);
+        e.hud?.setHealth(100);
       }, pose);
-      await page.waitForTimeout(1400);
+      await page.waitForTimeout(pose.ads ? 2500 : 1400);
       const file = path.join(OUT, `${tod}-${name}.png`);
       await page.screenshot({ path: file, timeout: 180000 });
       written.push(file);

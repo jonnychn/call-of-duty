@@ -469,7 +469,7 @@ const TonemapShader = {
           float gr = length( gd );
           float radius = 0.035 + fi * 0.028;
           // Thin annulus, not a filled blob.
-          float ring = smoothstep( radius, radius * 0.72, gr ) * smoothstep( radius * 0.45, radius * 0.7, gr );
+          float ring = ( 1.0 - smoothstep( radius * 0.72, radius, gr ) ) * smoothstep( radius * 0.45, radius * 0.7, gr );
           vec3 tint = i == 0 ? vec3( 0.45, 0.62, 1.0 )
                     : i == 1 ? vec3( 1.0, 0.72, 0.42 )
                              : vec3( 0.62, 1.0, 0.72 );

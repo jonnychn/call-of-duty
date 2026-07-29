@@ -218,26 +218,30 @@ export function gunMaterials() {
     return m;
   };
 
+  // Anodising is a dielectric film over aluminium, not bare metal, so the
+  // receiver runs at partial metalness: full metalness mirrors the desert sky
+  // straight into the camera and the whole gun clips to white. Roughness is
+  // also kept off the floor — under a normal map, gloss below ~0.35 is what
+  // produces the grazing-angle specular speckle.
   _lib = {
-    // Type III hard-anodised aluminium: dark warm grey, satin, fully metal.
-    alu: std('alu', 0x53565c, 0.40, 0.94, { normalMap: machined, roughnessMap: wearRoughness(0.40, 0.26), ns: 0.5, uvScale: 30 }),
+    alu: std('alu', 0x3b3e44, 0.46, 0.72, { normalMap: machined, roughnessMap: wearRoughness(0.46, 0.22), ns: 0.40, uvScale: 30, env: 0.85 }),
     // Same alloy but on the receiver flats, where the markings live.
-    aluMarked: std('aluMarked', 0x53565c, 0.40, 0.94, { normalMap: marks, ns: 0.7, uvScale: 9 }),
+    aluMarked: std('aluMarked', 0x393c42, 0.48, 0.70, { normalMap: marks, ns: 0.55, uvScale: 9, env: 0.8 }),
     // Nitrided barrel steel — darker and glossier than the receiver.
-    steel: std('steel', 0x44484e, 0.26, 1.0, { normalMap: machined, roughnessMap: wearRoughness(0.26, 0.2), ns: 0.35, uvScale: 42 }),
+    steel: std('steel', 0x2f333a, 0.36, 0.95, { normalMap: machined, roughnessMap: wearRoughness(0.36, 0.16), ns: 0.30, uvScale: 42, env: 0.8 }),
     // Bare/worn steel on pins, bolt face, springs.
-    bright: std('bright', 0x9aa1aa, 0.18, 1.0, { normalMap: machined, ns: 0.3, uvScale: 60 }),
+    bright: std('bright', 0x8b939d, 0.30, 0.95, { normalMap: machined, ns: 0.25, uvScale: 60, env: 0.9 }),
     // Flat-dark-earth polymer furniture. The one warm accent on the weapon.
-    fde: std('fde', 0x7d6b50, 0.62, 0.04, { normalMap: machined, roughnessMap: wearRoughness(0.6, 0.2), ns: 0.4, uvScale: 30, env: 0.9 }),
-    rubber: std('rubber', 0x2c2e31, 0.88, 0.0, { normalMap: stipple, ns: 1.0, uvScale: 60, env: 0.7 }),
-    poly: std('poly', 0x35383d, 0.66, 0.02, { normalMap: machined, ns: 0.35, uvScale: 34, env: 0.9 }),
-    opticBody: std('opticBody', 0x303337, 0.44, 0.55, { normalMap: machined, ns: 0.4, uvScale: 36 }),
+    fde: std('fde', 0x62553f, 0.68, 0.02, { normalMap: machined, roughnessMap: wearRoughness(0.66, 0.24), ns: 0.45, uvScale: 30, env: 0.55 }),
+    rubber: std('rubber', 0x232528, 0.90, 0.0, { normalMap: stipple, ns: 1.0, uvScale: 60, env: 0.4 }),
+    poly: std('poly', 0x2a2d31, 0.70, 0.02, { normalMap: machined, ns: 0.35, uvScale: 34, env: 0.55 }),
+    opticBody: std('opticBody', 0x26282c, 0.50, 0.45, { normalMap: machined, ns: 0.35, uvScale: 36, env: 0.7 }),
     // Exposed fingertips. The only warm, non-metal, non-black surface in the
     // frame — it is what stops the hands merging into the weapon.
-    skin: std('skin', 0x8a6248, 0.68, 0.0, { normalMap: stipple, ns: 0.25, uvScale: 120, env: 0.55 }),
-    glove: std('glove', 0x33353a, 0.82, 0.02, { normalMap: stipple, ns: 0.8, uvScale: 44, env: 0.7 }),
-    gloveHard: std('gloveHard', 0x24262a, 0.52, 0.05, { normalMap: machined, ns: 0.5, uvScale: 40 }),
-    sleeve: std('sleeve', 0x6d6a56, 0.9, 0.0, { normalMap: weave, ns: 0.9, uvScale: 70, env: 0.6 }),
+    skin: std('skin', 0x7a5540, 0.70, 0.0, { normalMap: stipple, ns: 0.22, uvScale: 120, env: 0.4 }),
+    glove: std('glove', 0x2b2d32, 0.84, 0.02, { normalMap: stipple, ns: 0.75, uvScale: 44, env: 0.45 }),
+    gloveHard: std('gloveHard', 0x1d1f23, 0.56, 0.05, { normalMap: machined, ns: 0.45, uvScale: 40, env: 0.5 }),
+    sleeve: std('sleeve', 0x565442, 0.92, 0.0, { normalMap: weave, ns: 0.85, uvScale: 70, env: 0.4 }),
     strap: std('strap', 0x2a2b2d, 0.8, 0.02, { normalMap: weave, ns: 0.7, uvScale: 90, env: 0.6 }),
     brass: std('brass', 0xb08d4a, 0.22, 1.0, { uvScale: 60 }),
   };

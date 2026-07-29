@@ -65,33 +65,38 @@ export class Level {
     const b = this.b;
     const R = () => this.rng();
 
-    // Material handles. `mat()` falls through to a locally-defined stand-in if
-    // the shared library has not grown that surface yet, so this file keeps
-    // building while the materials agent is mid-flight.
+    // Material handles. Everything here is a real baked surface from the shared
+    // library; the four `tinted` entries reuse another surface's maps under a
+    // different base colour, which keeps charred metal and hessian textured
+    // without paying for another bake.
     this.M = {
       sand: b.mat('sand'),
-      gravel: b.mat('gravel', { color: 0x8a8072, roughness: 1, tile: 3 }),
+      gravel: b.mat('gravel'),
       road: b.mat('road'),
+      roadLine: b.mat('roadLine'),
       conc: b.mat('concreteWall'),
       concF: b.mat('concreteFloor'),
       plasterA: b.mat('plasterWarm'),
       plasterB: b.mat('plasterPale'),
-      brick: b.mat('brick', { color: 0x7a5a48, roughness: 0.96, tile: 2.4 }),
-      tile: b.mat('tile', { color: 0x6d7a76, roughness: 0.6, tile: 1.2 }),
-      wood: b.mat('wood', { color: 0x6a5236, roughness: 0.92, tile: 1.6 }),
-      glass: b.mat('glass', { color: 0x0a0e13, roughness: 0.16, metalness: 0.1, tile: 2 }),
-      tarp: b.mat('tarp', { color: 0x8e6a3e, roughness: 0.95, side: THREE.DoubleSide, tile: 2 }),
+      brick: b.mat('brick'),
+      brickPale: b.mat('brickPale'),
+      tile: b.mat('tile'),
+      wood: b.mat('wood'),
+      glass: b.mat('glass'),
+      tarp: b.mat('tarp'),
       cRed: b.mat('containerRed'),
       cBlue: b.mat('containerBlue'),
       green: b.mat('militaryGreen'),
-      rust: b.mat('rustySteel'),
+      rust: b.mat('rustedIron'),
+      steel: b.mat('rustySteel'),
       gun: b.mat('gunmetal'),
     };
-    // Two locally-authored surfaces the library has no equivalent for.
-    this.M.dark = b.mat('__charred', { color: 0x14120f, roughness: 0.94, tile: 2 });
-    this.M.bag = b.mat('__sandbag', { color: 0x6b5f47, roughness: 0.98, tile: 1 });
-    this.M.cloth = b.mat('__cloth', { color: 0x9c9384, roughness: 0.97, side: THREE.DoubleSide, tile: 1 });
-    this.M.wire = b.mat('__wire', { color: 0x1b1b1c, roughness: 0.7, metalness: 0.3, tile: 1 });
+    this.M.dark = b.tinted('__charred', 'rustedIron', 0x2a2622, { roughness: 1.0, metalness: 0.35, tile: 2 });
+    this.M.scorch = b.tinted('__scorch', 'road', 0x3a352e, { roughness: 1.0, tile: 4 });
+    this.M.bag = b.tinted('__sandbag', 'tarp', 0xb9a682, { roughness: 1.0, tile: 0.9 });
+    this.M.cloth = b.tinted('__cloth', 'tarp', 0xd6cec0, { roughness: 1.0, side: THREE.DoubleSide, tile: 1.1 });
+    this.M.tarpB = b.tinted('__tarpBlue', 'tarp', 0x5d7488, { roughness: 1.0, side: THREE.DoubleSide, tile: 2 });
+    this.M.wire = b.tinted('__wire', 'gunmetal', 0x2a2a2c, { roughness: 0.8, metalness: 0.5, tile: 1 });
     this.M.trim = this.M.conc;
 
     this._ground();
@@ -107,7 +112,12 @@ export class Level {
     const info = b.emit(this.root, COLLISION_LAYER);
     this.buildStats = info;
 
+    const t0 = performance.now();
     this._bakeCollision();
+    const oct = this.collision.stats ? this.collision.stats() : null;
+    this.buildStats.octreeMs = Math.round(performance.now() - t0);
+    this.buildStats.octree = oct;
+    console.log('[level]', JSON.stringify(this.buildStats));
 
     this.spawnPoints.push(
       new THREE.Vector3(0, 1.0, 40),
@@ -156,12 +166,13 @@ export class Level {
   _reveal(axis, c, p, y, w, h, t, outward) {
     const b = this.b, m = this.M.trim;
     const d = t + 0.14;
+    const N = { collide: false };
     if (axis === 'x') {
-      b.box(m, c, y - 0.09, p + outward * 0.03, w + 0.34, 0.1, d, 0);      // sill
-      b.box(m, c, y + h, p + outward * 0.03, w + 0.34, 0.14, d, 0);        // lintel
+      b.box(m, c, y - 0.09, p + outward * 0.03, w + 0.34, 0.1, d, 0, N);   // sill
+      b.box(m, c, y + h, p + outward * 0.03, w + 0.34, 0.14, d, 0, N);     // lintel
     } else {
-      b.box(m, p + outward * 0.03, y - 0.09, c, d, 0.1, w + 0.34, 0);
-      b.box(m, p + outward * 0.03, y + h, c, d, 0.14, w + 0.34, 0);
+      b.box(m, p + outward * 0.03, y - 0.09, c, d, 0.1, w + 0.34, 0, N);
+      b.box(m, p + outward * 0.03, y + h, c, d, 0.14, w + 0.34, 0, N);
     }
   }
 
@@ -269,7 +280,8 @@ export class Level {
     const hf = o.hollowFloors ?? 0;
     if (!o.hollow) {
       for (let fl = Math.max(1, hf); fl <= floors; fl++) {
-        b.aabb(this.M.concF, x0 + t, y0 + fl * fh - 0.25, z0 + t, x1 - t, y0 + fl * fh, z1 - t);
+        b.aabb(this.M.concF, x0 + t, y0 + fl * fh - 0.25, z0 + t, x1 - t, y0 + fl * fh, z1 - t,
+          { collide: fl === Math.max(1, hf) });
       }
       const cy0 = y0 + hf * fh;
       const inset = 2.1;
@@ -290,7 +302,7 @@ export class Level {
       b.aabb(mat, x0, roofY, z0 + pt, x0 + pt, roofY + ph, z1 - pt);
       b.aabb(mat, x1 - pt, roofY, z0 + pt, x1, roofY + ph, z1 - pt);
       b.aabb(trim, x0 - 0.09, roofY + ph, z0 - 0.09, x1 + 0.09, roofY + ph + 0.12, z1 + 0.09, { collide: false });
-      if (o.roofClutter !== false) this._roofClutter(x0 + 1.2, x1 - 1.2, z0 + 1.2, z1 - 1.2, roofY);
+      if (o.roofClutter !== false) this._roofClutter(x0 + 1.2, x1 - 1.2, z0 + 1.2, z1 - 1.2, roofY, o.walkableRoof === true);
     }
 
     // Facade services: drainpipes, AC boxes, dishes, cable runs.
@@ -321,7 +333,7 @@ export class Level {
     return { H: y0 + H };
   }
 
-  _roofClutter(x0, x1, z0, z1, y) {
+  _roofClutter(x0, x1, z0, z1, y, collide = false) {
     const b = this.b, R = () => this.rng();
     const w = x1 - x0, d = z1 - z0;
     if (w < 2 || d < 2) return;
@@ -329,11 +341,12 @@ export class Level {
     for (let i = 0; i < n; i++) {
       const x = x0 + R() * w, z = z0 + R() * d;
       const r = R();
-      if (r < 0.3) P.waterTank(b, this.M.rust, x, y, z, 0.5 + R() * 0.25, 1.0 + R() * 0.4);
-      else if (r < 0.55) P.acUnit(b, this.M.rust, this.M.dark, x, y, z, R() * 3);
+      const C = { collide };
+      if (r < 0.3) P.waterTank(b, this.M.rust, x, y, z, 0.5 + R() * 0.25, 1.0 + R() * 0.4, collide);
+      else if (r < 0.55) P.acUnit(b, this.M.rust, this.M.dark, x, y, z, R() * 3, collide);
       else if (r < 0.72) P.satelliteDish(b, this.M.concF, x, y, z, R() * 6.2, 0.45 + R() * 0.3);
-      else if (r < 0.86) b.box(this.M.conc, x, y, z, 1.4 + R(), 1.0 + R() * 0.8, 1.3 + R(), R() * 3); // stair headhouse
-      else P.crateStack(b, this.M.wood, x, y, z, R() * 3, R);
+      else if (r < 0.86) b.box(this.M.conc, x, y, z, 1.4 + R(), 1.0 + R() * 0.8, 1.3 + R(), R() * 3, C); // stair headhouse
+      else P.crateStack(b, this.M.wood, x, y, z, R() * 3, R, collide);
     }
     // A slack aerial cable or two.
     if (R() < 0.7) P.wire(b, this.M.wire, x0, y + 1.6, z0, x1, y + 1.4, z1, 0.6, 5);
@@ -388,7 +401,7 @@ export class Level {
       b.box(this.M.concF, x + Math.cos(a) * rr, -0.02, z + Math.sin(a) * rr,
         r * 0.55, 0.22 + R() * 0.28, r * 0.55, a, { collide: false });
     }
-    b.plane(this.M.dark, x, 0.035, z, r * 2.6, r * 2.6, 0, { collide: false });
+    b.plane(this.M.scorch, x, 0.035, z, r * 2.6, r * 2.6, 0, { collide: false });
     b.plane(this.M.gravel, x, 0.05, z, r * 1.5, r * 1.5, 0, { collide: false });
     for (let i = 0; i < 40; i++) {
       const a = R() * Math.PI * 2, rr = r * (1.0 + R() * 2.4);
@@ -403,7 +416,7 @@ export class Level {
 
   _ground() {
     const size = 300;
-    const geo = new THREE.PlaneGeometry(size, size, 96, 96);
+    const geo = new THREE.PlaneGeometry(size, size, 44, 44);
     geo.rotateX(-Math.PI / 2);
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
@@ -434,7 +447,7 @@ export class Level {
 
     // Asphalt with a shallow crown, plus a darker worn centre band.
     b.plane(this.M.road, 0, 0.03, (Z0 + Z1) / 2, ROAD_HALF * 2, Z1 - Z0);
-    b.plane(this.M.dark, 0, 0.045, (Z0 + Z1) / 2, 3.2, Z1 - Z0, 0, { collide: false });
+    b.plane(this.M.scorch, 0, 0.045, (Z0 + Z1) / 2, 3.2, Z1 - Z0, 0, { collide: false });
 
     // Pavements: raised slab + kerb face + gutter strip. The kerb is the single
     // most useful human-scale reference in the frame.
@@ -442,11 +455,27 @@ export class Level {
       b.aabb(this.M.concF, s * ROAD_HALF, 0, Z0, s * KERB, PAVE_Y, Z1);
       b.aabb(this.M.conc, s * (ROAD_HALF - 0.16), 0, Z0, s * ROAD_HALF, PAVE_Y + 0.005, Z1);
       // gutter darkening
-      b.plane(this.M.dark, s * (ROAD_HALF - 0.5), 0.05, (Z0 + Z1) / 2, 1.0, Z1 - Z0, 0, { collide: false });
+      b.plane(this.M.scorch, s * (ROAD_HALF - 0.5), 0.05, (Z0 + Z1) / 2, 1.0, Z1 - Z0, 0, { collide: false });
       // kerb joints every 2.4 m
       for (let z = Z0; z < Z1; z += 2.4) {
         b.box(this.M.conc, s * (ROAD_HALF - 0.09), PAVE_Y - 0.02, z, 0.2, 0.03, 0.06, 0, { collide: false });
       }
+    }
+
+    // Broken centre line + edge lines. A corridor level lives or dies on its
+    // leading lines; these run straight at the gatehouse.
+    // The marking texture is one stripe across its U axis, so these quads take
+    // u = 0..1 across their width and repeat only along their length.
+    for (let z = Z0; z < Z1; z += 6.4) {
+      b.plane(this.M.roadLine, 0, 0.052, z, 1.3, 3.2, 0, { collide: false, uv: [1, 0.8] });
+    }
+    for (const s2 of [-1, 1]) {
+      b.plane(this.M.roadLine, s2 * (ROAD_HALF - 1.2), 0.052, (Z0 + Z1) / 2, 1.3, Z1 - Z0, 0,
+        { collide: false, uv: [1, (Z1 - Z0) / 4] });
+    }
+    // Faded pedestrian crossing where the cross street meets the junction.
+    for (let i = 0; i < 9; i++) {
+      b.plane(this.M.roadLine, -5.6 + i * 1.5, 0.053, 20.0, 1.3, 3.4, 0, { collide: false, uv: [1, 0.85] });
     }
 
     // Cross street heading west out of the junction.
@@ -478,18 +507,22 @@ export class Level {
       this._twall(-X, z, Math.PI / 2);
       this._twall(X, z, Math.PI / 2);
     }
-    // Cap the alley and cross-street exits so the player cannot walk out.
-    b.aabb(mat, -46, 0, -50, -32, 9, 126, { collide: true });
-    b.aabb(mat, 36, 0, -50, 46, 9, 126, { collide: true });
-    b.aabb(mat, -46, 0, -50, 46, 9, -44, { collide: true });
-    b.aabb(mat, -46, 0, 118, 46, 9, 126, { collide: true });
+    // Invisible blockers behind the set. These are what actually keep the
+    // player in bounds; the T-walls in front of them are scenery. Four boxes,
+    // 48 triangles, instead of a visible slab that would show down the alleys.
+    const H = { collide: true, hidden: true };
+    b.aabb(mat, -46, 0, -52, -38.5, 14, 128, H);
+    b.aabb(mat, 36.5, 0, -52, 46, 14, 128, H);
+    b.aabb(mat, -46, 0, -52, 46, 14, -44, H);
+    b.aabb(mat, -46, 0, 119, 46, 14, 128, H);
   }
 
   _twall(x, z, rotY) {
     const b = this.b;
-    b.box(this.M.concF, x, 0, z, 3.9, 0.25, 1.5, rotY);
-    b.box(this.M.conc, x, 0.25, z, 3.6, 3.4, 0.42, rotY);
-    b.box(this.M.conc, x, 3.65, z, 3.7, 0.16, 0.55, rotY, { collide: false });
+    const N = { collide: false };
+    b.box(this.M.concF, x, 0, z, 3.9, 0.25, 1.5, rotY, N);
+    b.box(this.M.conc, x, 0.25, z, 3.6, 3.4, 0.42, rotY, N);
+    b.box(this.M.conc, x, 3.65, z, 3.7, 0.16, 0.55, rotY, N);
   }
 
   // =========================================================================
@@ -607,7 +640,7 @@ export class Level {
     //     street; the debris is the ramp to its roof at 6.6 m.
     this._block({
       x0: KERB, x1: 28, z0: 16, z1: 30, floors: 2, floorH: 3.3, mat: this.M.plasterB,
-      open: ['-x', '+z', '-z'], parapet: 0.85,
+      open: ['-x', '+z', '-z'], parapet: 0.85, walkableRoof: true,
       doors: [{ face: '-x', c: 20.5, w: 1.6 }],
     });
     // Shear the corner off: a wedge of missing wall with exposed floor slabs.
@@ -733,7 +766,7 @@ export class Level {
       for (let i = 0; i < 9; i++) b.box(this.M.rust, c.x0 - 0.4 + i * 1.1, by, zz, 0.06, 1.0, 0.06, 0, { collide: false });
       b.aabb(this.M.rust, c.x0 - 0.6, by + 1.0, zz - 0.05, c.x1 - 5.6, by + 1.06, zz + 0.05, { collide: false });
     }
-    this.spawnPoints.push(new THREE.Vector3(c.x1 - 4.0, by + 0.2, c.z1 - 2.4));
+    this.spawnPoints.push(new THREE.Vector3(c.x1 - 9.5, by + 0.25, c.z1 - 2.3)); // on the footbridge, clear of the sandbags
 
     // Ground clutter: pallets, crates, drums, tyres, a burnt car in the corner.
     P.carWreck(b, this.M.dark, this.M.dark, this.M.rust, c.x0 + 3.4, 0, c.z1 - 4.0, 1.15, R);
@@ -803,7 +836,7 @@ export class Level {
     }
     b.aabb(mat, -16.4, top + 0.35, z0 + 0.35, -15.9, top + 1.35, z1 - 0.35);
     b.aabb(mat, 15.9, top + 0.35, z0 + 0.35, 16.4, top + 1.35, z1 - 0.35);
-    this._roofClutter(-15, 15, z0 + 1, z1 - 1, top + 0.35);
+    this._roofClutter(-15, 15, z0 + 1, z1 - 1, top + 0.35, true);
 
     // Corbelled string course under the arch springing, plus lamp brackets.
     for (const s of [-1, 1]) {
@@ -1008,7 +1041,7 @@ export class Level {
     P.busWreck(b, this.M.cBlue, this.M.dark, this.M.rust, this.M.glass, -1.6, 0, 51.5, 1.42);
     this._cover(-1.6, 48.6); this._cover(-1.6, 54.4);
     // scorch under it
-    b.plane(this.M.dark, -1.6, 0.055, 51.5, 12, 6, 1.42, { collide: false });
+    b.plane(this.M.scorch, -1.6, 0.055, 51.5, 12, 6, 1.42, { collide: false });
 
     // Crater in the near road — the "ground" pose looks straight into it.
     this._crater(2.6, 36.5, 3.4, 0.7);

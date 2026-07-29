@@ -1,6 +1,6 @@
 import {
   fbm2, ridged2, worley2, worleyCell, value2, vfbm2, warpFbm2, warpRidged2,
-  hash2, tri, clamp01, smoothstep, smootherstep, mix,
+  hash2, tri, scatter2, clamp01, smoothstep, smootherstep, mix,
 } from './Noise.js';
 import { heightToNormalWorld, horizonAO } from './SurfaceFields.js';
 
@@ -49,23 +49,75 @@ function band(n, fn) {
     const v = y * inv;
     for (let x = 0; x < n; x++) d[y * n + x] = fn(x * inv, v);
   }
-  return { d, n };
+  return { d, n, cv: -1, ty: 0, r0: 0, r1: 0 };
 }
 
-/** Wrapped quintic-weighted bilinear sample of a band at unit-tile (u,v). */
+/**
+ * Wrapped quintic-weighted bilinear sample of a band at unit-tile (u,v).
+ *
+ * Generators iterate y on the outside, so the row indices and the vertical
+ * weight are identical for every texel in a scanline. They are cached on the
+ * band and recomputed only when v changes, which halves the cost of a lookup —
+ * and with eight or nine bands live in an inner loop, band sampling is
+ * otherwise the second largest line in the profile after Worley.
+ */
 function bs(b, u, v) {
   const n = b.n, d = b.d;
-  const fx = u * n - 0.5, fy = v * n - 0.5;
-  const ix = Math.floor(fx), iy = Math.floor(fy);
-  const tx = quint(fx - ix), ty = quint(fy - iy);
+  if (b.cv !== v) {
+    const fy = v * n - 0.5;
+    let iy = fy | 0; if (fy < 0) iy -= 1;
+    b.ty = quint(fy - iy);
+    let y0 = iy % n; if (y0 < 0) y0 += n;
+    b.r0 = y0 * n;
+    b.r1 = (y0 + 1 === n ? 0 : y0 + 1) * n;
+    b.cv = v;
+  }
+  const fx = u * n - 0.5;
+  let ix = fx | 0; if (fx < 0) ix -= 1;
+  const tx = quint(fx - ix);
   let x0 = ix % n; if (x0 < 0) x0 += n;
-  let y0 = iy % n; if (y0 < 0) y0 += n;
   const x1 = x0 + 1 === n ? 0 : x0 + 1;
-  const r0 = y0 * n, r1 = (y0 + 1 === n ? 0 : y0 + 1) * n;
+  const r0 = b.r0, r1 = b.r1;
   const a = d[r0 + x0], b1 = d[r0 + x1];
   const c = d[r1 + x0], e = d[r1 + x1];
   const top = a + (b1 - a) * tx, bot = c + (e - c) * tx;
-  return top + (bot - top) * ty;
+  return top + (bot - top) * b.ty;
+}
+
+// --------------------------- micro-grain tiles -----------------------------
+//
+// The millimetre band is, by construction, high-frequency low-amplitude noise
+// with no large-scale structure at all. Evaluating a three-octave fbm per
+// texel for it costs more than the whole rest of a generator and buys nothing,
+// because nothing about the result depends on *where* on the tile you are.
+//
+// So it is precomputed once into two small tiles and indexed directly. The
+// tile sizes are coprime primes, so the summed pattern only repeats after
+// 251×199 ≈ 50k texels — far beyond any texture we bake — while each
+// individual tile is itself seamless.
+
+const MA_N = 251, MB_N = 199;
+const microCache = new Map();
+
+function buildMicro(n, seed, freq, octaves) {
+  const d = new Float32Array(n * n);
+  const inv = 1 / n;
+  for (let y = 0; y < n; y++) {
+    const v = y * inv;
+    for (let x = 0; x < n; x++) d[y * n + x] = vfbm2(x * inv * freq, v * freq, { octaves, period: freq, seed });
+  }
+  return d;
+}
+
+/** Two decorrelated micro-noise tiles: A is coarser grain, B is fine grit. */
+function micro(seed) {
+  let m = microCache.get(seed);
+  if (!m) {
+    m = { A: buildMicro(MA_N, seed, 62, 3), B: buildMicro(MB_N, seed + 977, 46, 2) };
+    if (microCache.size > 24) microCache.clear();
+    microCache.set(seed, m);
+  }
+  return m;
 }
 
 function lerp3(out, a, b, t) {
@@ -102,90 +154,138 @@ const SURFACES = {
    * down the wall. Meso: exposed aggregate, trowel sweep, shrinkage crazing
    * and structural cracking. Micro: cement paste grain and pinhole porosity.
    */
+  /**
+   * Board-formed concrete.
+   *
+   * The tells that make concrete read as concrete, in order of how much work
+   * they do: blowholes (the small round air voids left against the formwork),
+   * vertical run-off staining, the horizontal form-board joints, and spalled
+   * patches where the face has broken away to expose aggregate. Isotropic
+   * warped noise — the obvious thing to reach for — gives none of those and
+   * lands somewhere between camouflage and a cloud texture.
+   */
   concrete: {
-    amplitude: 0.012, tile: 2.5, detail: 'grain',
-    ao: { radiusMeters: 0.05, strength: 1.5, microStrength: 1.0 },
+    amplitude: 0.014, tile: 2.5, detail: 'grain',
+    ao: { radiusMeters: 0.04, strength: 1.7, microStrength: 1.1 },
     gen(size, seed, o = {}) {
       const p = planes(size);
       const { rgb, height, rough, metal } = p;
       const M = mesoRes(size);
-      const damp = band(MACRO, (u, v) => warpFbm2(u * 3, v * 3, { octaves: 4, period: 3, warp: 0.6, warpFreq: 1 }));
-      const pour = band(MACRO, (u, v) => fbm2(u * 2, v * 5, { octaves: 3, period: 2 }));
-      const grimeB = band(MACRO, (u, v) => fbm2(u * 6, v * 1, { octaves: 4, period: 6 }));
-      const lightB = band(48, (u, v) => fbm2(u * 2, v * 2, { octaves: 3, period: 2 }));
-      const trowelB = band(M, (u, v) => fbm2(u * 14 + 2.1, v * 14, { octaves: 4, period: 14 }));
-      const crazeB = band(M, (u, v) => warpRidged2(u * 64, v * 64, { octaves: 3, period: 64, warp: 0.3, warpFreq: 0.25 }));
-      const crackB = band(M, (u, v) => warpRidged2(u * 11, v * 11, { octaves: 5, period: 11, warp: 0.5, warpFreq: 0.4 }));
+      // MACRO. Staining on a wall is made by water, so it runs downwards:
+      // high frequency across, very low frequency down.
+      const stainB = band(MACRO, (u, v) => fbm2(u * 12, v * 1.4, { octaves: 4, period: 12 }));
+      const dampB = band(MACRO, (u, v) => fbm2(u * 3, v * 2, { octaves: 4, period: 3 }));
+      const mottleB = band(MACRO, (u, v) => fbm2(u * 5, v * 5, { octaves: 4, period: 5 }));
+      const tonalB = band(32, (u, v) => fbm2(u * 2, v * 2, { octaves: 3, period: 2 }));
+      const jointB = band(64, (u, v) => fbm2(u * 9, v * 3, { octaves: 3, period: 9 }));
+      const spallB = band(M, (u, v) => warpFbm2(u * 7, v * 7, { octaves: 4, period: 7, warp: 0.7, warpFreq: 0.6 }));
+      const crackB = band(M, (u, v) => warpRidged2(u * 13, v * 13, { octaves: 5, period: 13, warp: 0.6, warpFreq: 0.35 }));
+      const crazeB = band(M, (u, v) => warpRidged2(u * 60, v * 60, { octaves: 3, period: 60, warp: 0.3, warpFreq: 0.25 }));
 
-      const dry = [0.520, 0.512, 0.494];
-      const wet = [0.190, 0.190, 0.196];
+      const dry = [0.510, 0.503, 0.487];
+      const wet = [0.175, 0.176, 0.182];
       const c = [0, 0, 0], aggC = [0, 0, 0];
+      const BOARDS = 2;                       // form boards per tile
+      const mic = micro(seed);
+      const mA = mic.A, mB = mic.B;
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
+        // form-board joint: a shallow recessed line with a tone step across it
+        const bRow = Math.floor(v * BOARDS);
+        const bF = v * BOARDS - bRow;
+        const boardTone = (hash2(0, bRow, seed + 3) - 0.5) * 0.16;
+        const rowA = (y % MA_N) * MA_N, rowB = (y % MB_N) * MB_N;
+        let xa = 0, xb = 0;
+
         for (let x = 0; x < size; x++) {
           const i = y * size + x;
           const u = x / size;
+          const grain = mA[rowA + xa], fine = mB[rowB + xb];
+          if (++xa === MA_N) xa = 0;
+          if (++xb === MB_N) xb = 0;
 
-          // MESO — aggregate exposure. Two grades, ~2.5 cm and ~1 cm across.
-          // Worley stays at full resolution: the cell boundary is the stone's
-          // silhouette and it has to stay hard.
-          worleyCell(u * 96, v * 96, 96, seed, CELL);
-          const aggD = CELL[0], aggId = CELL[2];
-          const aggBody = 1 - smoothstep(0.10, 0.34, aggD);
-          const aggPop = aggBody * smoothstep(0.30, 0.62, aggId);
-          worleyCell(u * 240, v * 240, 240, seed + 17, CELL);
-          const fineAgg = (1 - smoothstep(0.08, 0.30, CELL[0])) * smoothstep(0.45, 0.75, CELL[2]);
-          const fineId = CELL[2];
+          // MESO — blowholes. Round air voids against the formwork: sparse,
+          // wildly varied in size, with a spherical-cap depth profile. Density
+          // is the thing to get right — one in six cells, not one in three,
+          // or the wall turns into a golf ball.
+          scatter2(u * 44, v * 44, 44, seed, CELL);
+          const bhId = CELL[1];
+          const bhR = 0.045 + (bhId - 0.82) * 1.30;
+          const bh = bhId > 0.82 && CELL[0] < bhR
+            ? Math.sqrt(Math.max(0, bhR * bhR - CELL[0] * CELL[0])) / bhR : 0;
+          scatter2(u * 130, v * 130, 130, seed + 17, CELL);
+          const bh2 = CELL[1] > 0.80 && CELL[0] < 0.17 ? 1 - smoothstep(0.05, 0.17, CELL[0]) : 0;
 
-          const trowel = bs(trowelB, u, v);
-          // crazing and cracks: thresholded hard so they stay hairline. A wide
-          // smoothstep here is what turns cracks into grey tadpoles.
-          const craze = smoothstep(0.900, 0.985, bs(crazeB, u, v));
-          const crack = smoothstep(0.930, 0.992, bs(crackB, u, v));
+          // spalled patch: the face has broken off, exposing the aggregate.
+          // The aggregate Worley is only evaluated inside a spall — it is the
+          // single most expensive call in the generator and it is invisible
+          // over the ~95% of the tile that is intact.
+          const spallRaw = bs(spallB, u, v);
+          const spall = smoothstep(0.660, 0.700, spallRaw);
+          let aggId = 0, aggBody = 0, agg = 0;
+          if (spall > 0.002) {
+            worleyCell(u * 70, v * 70, 70, seed + 29, CELL);
+            aggId = CELL[2];
+            aggBody = 1 - smoothstep(0.16, 0.34, CELL[0]);
+            agg = aggBody * spall;
+          }
 
-          // MICRO — full resolution, cheap value noise only
-          const grain = vfbm2(u * 300, v * 300, { octaves: 3, period: 300, seed });
-          const pore = smoothstep(0.88, 1.0, value2(u * 420, v * 420, 420, seed + 3));
+          const craze = smoothstep(0.905, 0.985, bs(crazeB, u, v));
+          const crack = smoothstep(0.885, 0.968, bs(crackB, u, v));
 
-          const m = bs(damp, u, v), g = bs(grimeB, u, v), po = bs(pour, u, v), li = bs(lightB, u, v);
+          // the form joint wobbles and fades along its length; a dead-straight
+          // 1-texel line is the most mechanical mark a texture can carry
+          const jw = (bs(jointB, u, v) - 0.5) * 0.10;
+          const joint = (1 - smoothstep(0.004, 0.026, Math.abs(Math.min(bF, 1 - bF) + jw)))
+            * (0.35 + bs(jointB, u * 1.7, v) * 0.85);
+          const st = bs(stainB, u, v), dm = bs(dampB, u, v), mo = bs(mottleB, u, v), tn = bs(tonalB, u, v);
 
-          height[i] = clamp01(0.50
-            + (po - 0.5) * 0.10
-            + (trowel - 0.5) * 0.14
-            + aggPop * 0.34 + fineAgg * 0.14
-            + (grain - 0.5) * 0.06
-            - pore * 0.30
-            - craze * 0.30
-            - crack * 0.85);
+          height[i] = clamp01(0.62
+            + (mo - 0.5) * 0.10
+            + boardTone * 0.6
+            + (grain - 0.5) * 0.05 + (fine - 0.5) * 0.035
+            - bh * 0.62 - bh2 * 0.30
+            - spall * 0.42 + agg * 0.40
+            - joint * 0.55
+            - craze * 0.26
+            - crack * 0.80);
 
-          const shade = 0.82 + li * 0.38 + (po - 0.5) * 0.10 + (trowel - 0.5) * 0.11 + (grain - 0.5) * 0.09;
-          // every stone is a different stone — flint, quartz, granite chip
-          const at = aggPop * 0.8 + fineAgg * 0.5;
-          aggC[0] = 0.30 + aggId * 0.42; aggC[1] = 0.29 + aggId * 0.40; aggC[2] = 0.27 + aggId * 0.36;
-          if (fineAgg > aggPop) { aggC[0] = 0.28 + fineId * 0.46; aggC[1] = 0.27 + fineId * 0.44; aggC[2] = 0.26 + fineId * 0.40; }
-          lerp3(c, dry, aggC, clamp01(at));
-          c[0] *= shade; c[1] *= shade; c[2] *= shade;
-
-          const wetK = smoothstep(0.54, 0.80, m) * 0.9;
+          // Value range is what separates a photograph from a noise field.
+          // Metre-scale tonal drift, decimetre mottling and millimetre grain
+          // all push on the same shade term, deliberately hard.
+          const shade = 0.66 + tn * 0.34 + mo * 0.40 + boardTone + (grain - 0.5) * 0.30 + (fine - 0.5) * 0.16;
+          c[0] = dry[0] * shade; c[1] = dry[1] * shade; c[2] = dry[2] * shade;
+          // exposed aggregate: every stone a different stone
+          aggC[0] = 0.26 + aggId * 0.44; aggC[1] = 0.25 + aggId * 0.42; aggC[2] = 0.24 + aggId * 0.37;
+          // the fresh fracture face is lighter and chalkier than the weathered
+          // skin, and its rim catches a hard shadow
+          const spallRim = smoothstep(0.648, 0.663, spallRaw) * (1 - smoothstep(0.666, 0.684, spallRaw));
+          lerp3(c, c, [0.400, 0.386, 0.362], spall * 0.9);
+          lerp3(c, c, aggC, agg * 0.95);
+          const rimK = spallRim * 0.34;
+          c[0] *= 1 - rimK; c[1] *= 1 - rimK; c[2] *= 1 - rimK;
+          // vertical run-off staining, strongest under the form joints
+          const stain = smoothstep(0.50, 0.86, st) * (0.55 + smoothstep(0.0, 0.25, bF) * 0.45);
+          c[0] *= 1 - stain * 0.36; c[1] *= 1 - stain * 0.345; c[2] *= 1 - stain * 0.30;
+          const wetK = smoothstep(0.60, 0.86, dm) * 0.85;
           lerp3(c, c, wet, wetK);
-          const dirt = smoothstep(0.48, 0.86, g) * 0.34;
-          c[0] *= 1 - dirt * 1.05; c[1] *= 1 - dirt; c[2] *= 1 - dirt * 0.88;
-          // efflorescence — pale salt bloom at the fringe of the damp patch
-          const eff = smoothstep(0.44, 0.52, m) * (1 - smoothstep(0.56, 0.66, m));
-          c[0] = mix(c[0], 0.74, eff * 0.40); c[1] = mix(c[1], 0.73, eff * 0.40); c[2] = mix(c[2], 0.72, eff * 0.40);
-          const dk = crack * 0.70 + craze * 0.34;
+          // efflorescence — pale salt bloom at the fringe of the damp
+          const eff = smoothstep(0.50, 0.58, dm) * (1 - smoothstep(0.62, 0.72, dm));
+          c[0] = mix(c[0], 0.76, eff * 0.40); c[1] = mix(c[1], 0.75, eff * 0.40); c[2] = mix(c[2], 0.74, eff * 0.40);
+          // voids and fractures are dark because they are holes
+          const dk = crack * 0.66 + craze * 0.30 + bh * 0.55 + bh2 * 0.35 + joint * 0.45;
           c[0] *= 1 - dk; c[1] *= 1 - dk; c[2] *= 1 - dk;
           writeRGB(rgb, i, c[0], c[1], c[2]);
 
-          // Roughness carries more of this material than albedo does: chalky
-          // dry paste at 0.95, polished stone faces at 0.45, wet at 0.22.
-          let r = 0.95 - (grain - 0.5) * 0.14 + pore * 0.04;
-          r = mix(r, 0.44 + aggId * 0.24, clamp01(at) * 0.9);
-          r = mix(r, 0.60, smoothstep(0.55, 0.9, trowel) * 0.55);    // burnished laitance
-          r = mix(r, 0.22, wetK);                                    // wet is the strongest cue
-          r = mix(r, 0.99, craze * 0.5 + crack * 0.6);               // fresh fracture is chalky
-          rough[i] = clamp01(r + dirt * 0.06);
+          // Roughness does more work here than albedo: chalky dry paste at
+          // 0.95, polished aggregate faces at 0.45, wet at 0.20.
+          let r = 0.95 - (grain - 0.5) * 0.14;
+          r = mix(r, 0.42 + aggId * 0.26, agg * 0.9);
+          r = mix(r, 0.99, spall * (1 - aggBody) * 0.7 + craze * 0.4 + crack * 0.5);
+          r = mix(r, 0.20, wetK);
+          r = mix(r, 0.62, stain * 0.30);        // stained areas hold a film
+          rough[i] = clamp01(r);
           metal[i] = 0;
         }
       }

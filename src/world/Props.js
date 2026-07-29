@@ -44,7 +44,7 @@ export function hesco(b, fill, frame, x, y, z, len, rotY) {
 
 /** Sandbag emplacement: rows of staggered bags, optionally with a firing step. */
 export function sandbags(b, mat, x, y, z, rotY, rows = 3, len = 7) {
-  const bag = new THREE.CapsuleGeometry(0.21, 0.32, 3, 7);
+  const bag = new THREE.CapsuleGeometry(0.21, 0.32, 2, 6);
   bag.rotateZ(Math.PI / 2);
   const c = Math.cos(rotY), s = Math.sin(rotY);
   for (let row = 0; row < rows; row++) {
@@ -241,8 +241,8 @@ export function laundry(b, wire_, cloth, x0, y0, z0, x1, y1, z1, rng) {
 
 // ------------------------------ roof clutter --------------------------------
 
-export function acUnit(b, metal, dark, x, y, z, rotY) {
-  b.box(metal, x, y, z, 0.86, 0.62, 0.72, rotY);
+export function acUnit(b, metal, dark, x, y, z, rotY, collide = true) {
+  b.box(metal, x, y, z, 0.86, 0.62, 0.72, rotY, { collide });
   b.box(dark, x, y + 0.62, z, 0.7, 0.06, 0.58, rotY, { collide: false });
   cylinder(b, dark, x, y + 0.18, z + 0.37, 0.22, 0.05, { x: Math.PI / 2, y: 0, z: 0 }, { collide: false });
 }
@@ -255,8 +255,8 @@ export function satelliteDish(b, metal, x, y, z, rotY, r = 0.55) {
   b.box(metal, x + Math.sin(rotY) * r * 0.5, y + 0.55, z + Math.cos(rotY) * r * 0.5, 0.07, 0.07, 0.5, rotY, { collide: false });
 }
 
-export function waterTank(b, mat, x, y, z, r = 0.62, h = 1.15) {
-  cylinder(b, mat, x, y + 0.18, z, r, h, null, { hi: true });
+export function waterTank(b, mat, x, y, z, r = 0.62, h = 1.15, collide = true) {
+  cylinder(b, mat, x, y + 0.18, z, r, h, null, { hi: true, collide });
   b.box(mat, x, y, z - r * 0.7, 0.1, 0.2, 0.1, 0, { collide: false });
   b.box(mat, x, y, z + r * 0.7, 0.1, 0.2, 0.1, 0, { collide: false });
   b.box(mat, x - r * 0.7, y, z, 0.1, 0.2, 0.1, 0, { collide: false });
@@ -289,13 +289,13 @@ export function oilDrum(b, mat, x, y, z, rotY = 0, tipped = false) {
   }
 }
 
-export function crateStack(b, mat, x, y, z, rotY, rng) {
+export function crateStack(b, mat, x, y, z, rotY, rng, collide = true) {
   const r = rng || (() => 0.5);
   const n = 1 + Math.floor(r() * 3);
   let h = y;
   for (let i = 0; i < n; i++) {
     const s = 0.62 + r() * 0.3;
-    b.box(mat, x + (r() - 0.5) * 0.18 * i, h, z + (r() - 0.5) * 0.18 * i, s, s * 0.72, s * 0.9, rotY + (r() - 0.5) * 0.4);
+    b.box(mat, x + (r() - 0.5) * 0.18 * i, h, z + (r() - 0.5) * 0.18 * i, s, s * 0.72, s * 0.9, rotY + (r() - 0.5) * 0.4, { collide });
     h += s * 0.72;
   }
 }
