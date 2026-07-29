@@ -41,12 +41,19 @@ function grad2(hash, x, y) {
 
 /** Tiling Perlin noise. `period` must be an integer for seamless wrap. */
 export function perlin2(x, y, period = 256) {
-  const wrap = (v) => ((v % period) + period) % period;
   const X0 = Math.floor(x), Y0 = Math.floor(y);
   const xf = x - X0, yf = y - Y0;
   const u = fade(xf), v = fade(yf);
-  const xi = wrap(X0) & 255, yi = wrap(Y0) & 255;
-  const xi1 = wrap(X0 + 1) & 255, yi1 = wrap(Y0 + 1) & 255;
+  // Wrap inlined rather than closed over: this is the single hottest function
+  // in the whole bake (tens of millions of calls) and the per-call closure
+  // allocation showed up as real time in the profile.
+  const p = period;
+  let w0 = X0 % p; if (w0 < 0) w0 += p;
+  let w1 = (X0 + 1) % p; if (w1 < 0) w1 += p;
+  let w2 = Y0 % p; if (w2 < 0) w2 += p;
+  let w3 = (Y0 + 1) % p; if (w3 < 0) w3 += p;
+  const xi = w0 & 255, yi = w2 & 255;
+  const xi1 = w1 & 255, yi1 = w3 & 255;
 
   const aa = PERM[PERM[xi] + yi];
   const ab = PERM[PERM[xi] + yi1];
@@ -166,24 +173,86 @@ export function vfbm2(x, y, { octaves = 4, lacunarity = 2, gain = 0.5, period = 
   return sum / norm;
 }
 
+// --------------------------- cached warp fields ----------------------------
+//
+// The warp offset is, by definition, a LOW frequency field: `warpFreq` is a
+// fraction of the base frequency, so over one tile it carries only a handful
+// of cycles. Evaluating it as two 3-octave fbms *per sample* — six octaves of
+// Perlin to produce a value that barely changes between neighbouring texels —
+// was costing more than the warped noise it feeds. It dominated the bake:
+// 1.5 s of concrete's 2.1 s went into three warped bands.
+//
+// So it is tabulated once per (period, warpFreq, tag) on a small grid and
+// sampled with a wrapping quintic filter. A 128² table over ~4 cycles is 32
+// samples per cycle, far beyond what the offset needs to stay smooth, and the
+// table is shared by every band and every surface that asks for the same
+// warp geometry.
+//
+// A side effect is a genuine correctness fix. The old code used the requested
+// `warpFreq` while giving the underlying fbm the *rounded* period `wp`, so the
+// warp field did not actually close across the tile (warpFreq 0.6 on period 7
+// spans 4.2 units of a 4-periodic field) and left a faint seam in every warped
+// surface. The table spans exactly `wp` units, so it wraps exactly.
+
+const WARP_RES = 128;
+const warpCache = new Map();
+
+function warpTable(period, warpFreq, ox1, oy1, ox2, oy2, tag) {
+  const wp = Math.max(1, Math.round(period * warpFreq));
+  const key = `${tag}|${wp}`;
+  let t = warpCache.get(key);
+  if (t) return t;
+  const N = WARP_RES;
+  const qx = new Float32Array(N * N), qy = new Float32Array(N * N);
+  const step = wp / N;
+  for (let j = 0; j < N; j++) {
+    const v = j * step;
+    for (let i = 0; i < N; i++) {
+      const u = i * step;
+      qx[j * N + i] = fbm2(u + ox1, v + oy1, { octaves: 3, period: wp }) - 0.5;
+      qy[j * N + i] = fbm2(u + ox2, v + oy2, { octaves: 3, period: wp }) - 0.5;
+    }
+  }
+  t = { qx, qy, N };
+  if (warpCache.size > 48) warpCache.clear();
+  warpCache.set(key, t);
+  return t;
+}
+
+/** Wrapping quintic-weighted sample of a warp table at unit-tile (u, v). */
+function warpSample(arr, N, gx, gy) {
+  let i0 = Math.floor(gx), j0 = Math.floor(gy);
+  const tx = fade(gx - i0), ty = fade(gy - j0);
+  i0 %= N; if (i0 < 0) i0 += N;
+  j0 %= N; if (j0 < 0) j0 += N;
+  const i1 = i0 + 1 === N ? 0 : i0 + 1;
+  const r0 = j0 * N, r1 = (j0 + 1 === N ? 0 : j0 + 1) * N;
+  const a = arr[r0 + i0], b = arr[r0 + i1];
+  const c = arr[r1 + i0], d = arr[r1 + i1];
+  const top = a + (b - a) * tx, bot = c + (d - c) * tx;
+  return top + (bot - top) * ty;
+}
+
 /**
  * Domain-warped fbm. A single warp iteration is what separates "procedural
  * noise" from "a photograph of a surface": it destroys the axis-aligned
  * lattice signature of Perlin and produces the swirled, flow-like structure
  * real weathering has.
  */
-export function warpFbm2(x, y, { octaves = 5, period = 64, warp = 0.5, warpFreq = 0.5, seed = 0 } = {}) {
-  const wp = Math.max(1, Math.round(period * warpFreq));
-  const qx = fbm2(x * warpFreq + 3.7, y * warpFreq + 1.3, { octaves: 3, period: wp }) - 0.5;
-  const qy = fbm2(x * warpFreq - 2.1, y * warpFreq + 5.9, { octaves: 3, period: wp }) - 0.5;
+export function warpFbm2(x, y, { octaves = 5, period = 64, warp = 0.5, warpFreq = 0.5 } = {}) {
+  const t = warpTable(period, warpFreq, 3.7, 1.3, -2.1, 5.9, 'f');
+  const gx = (x / period) * t.N, gy = (y / period) * t.N;
+  const qx = warpSample(t.qx, t.N, gx, gy);
+  const qy = warpSample(t.qy, t.N, gx, gy);
   return fbm2(x + qx * warp, y + qy * warp, { octaves, period });
 }
 
 /** Domain-warped ridged noise — cracks that meander instead of running straight. */
 export function warpRidged2(x, y, { octaves = 4, period = 64, warp = 0.4, warpFreq = 0.5 } = {}) {
-  const wp = Math.max(1, Math.round(period * warpFreq));
-  const qx = fbm2(x * warpFreq + 11.2, y * warpFreq - 4.4, { octaves: 3, period: wp }) - 0.5;
-  const qy = fbm2(x * warpFreq - 8.8, y * warpFreq + 7.1, { octaves: 3, period: wp }) - 0.5;
+  const t = warpTable(period, warpFreq, 11.2, -4.4, -8.8, 7.1, 'r');
+  const gx = (x / period) * t.N, gy = (y / period) * t.N;
+  const qx = warpSample(t.qx, t.N, gx, gy);
+  const qy = warpSample(t.qy, t.N, gx, gy);
   return ridged2(x + qx * warp, y + qy * warp, { octaves, period });
 }
 

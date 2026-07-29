@@ -39,6 +39,16 @@ import * as P from './Props.js';
 /** Meshes on this layer are included in the collision octree. */
 export const COLLISION_LAYER = 2;
 
+/**
+ * Camera positions the screenshot harness drives to, plus the player spawns.
+ * Random set dressing keeps out of a 1.8 m bubble around each of these.
+ */
+const KEEP_CLEAR = [
+  [0, 42], [-14, -12], [26, 58], [-8, -14], [0, 44], [0, 20], [4, 30], [-20.5, 6],
+  [0, 56], [0, 78], [22, 47], [-4.5, 28.4], [-13.5, 28.6], [16, 24], [-18, 1],
+  [-24, -10.3], [-2, 86], [27.5, 58], [0, 40], [-17, 8], [23, 50], [2, 96],
+];
+
 const ROAD_HALF = 7.0;      // asphalt half-width
 const KERB = 10.4;          // facade line / back of pavement
 const PAVE_Y = 0.17;        // pavement top
@@ -60,6 +70,20 @@ export class Level {
   _randInt(a, b) { return Math.floor(this._rand(a, b + 1)); }
   _pick(arr) { return arr[Math.floor(this.rng() * arr.length)]; }
   _cover(x, z) { this.coverPoints.push(new THREE.Vector3(x, 0, z)); }
+
+  /**
+   * Points that random scatter must leave alone: the review camera positions
+   * and the spawns. Hand-placed props get checked by eye, but a 400-item
+   * rubble scatter will eventually drop a crate exactly where the player
+   * starts, and "a drum is clipping the spawn camera" is not a bug you want to
+   * rediscover every time the seed moves.
+   */
+  _blocked(x, z, r = 1.3) {
+    for (const [px, pz] of KEEP_CLEAR) {
+      if ((x - px) * (x - px) + (z - pz) * (z - pz) < (r + 0.5) * (r + 0.5)) return true;
+    }
+    return false;
+  }
 
   build() {
     const b = this.b;
@@ -150,12 +174,12 @@ export class Level {
    * @param axis 'x' | 'z' — the direction the wall runs.
    * @param openings [{c, w, y, h}] c = centre along axis, y = sill (absolute).
    */
-  _wall(mat, axis, a0, a1, p, y0, h, t, openings = []) {
+  _wall(mat, axis, a0, a1, p, y0, h, t, openings = [], opts) {
     const b = this.b;
     const put = (s, e, yy, hh) => {
       if (e - s < 0.02 || hh < 0.02) return;
-      if (axis === 'x') b.aabb(mat, s, yy, p - t / 2, e, yy + hh, p + t / 2);
-      else b.aabb(mat, p - t / 2, yy, s, p + t / 2, yy + hh, e);
+      if (axis === 'x') b.aabb(mat, s, yy, p - t / 2, e, yy + hh, p + t / 2, opts);
+      else b.aabb(mat, p - t / 2, yy, s, p + t / 2, yy + hh, e, opts);
     };
     const ops = openings
       .filter((o) => o.c - o.w / 2 > a0 - 0.01 && o.c + o.w / 2 < a1 + 0.01)
@@ -207,6 +231,16 @@ export class Level {
     const extra = o.extra ?? [];
     const w = x1 - x0, d = z1 - z0;
 
+    // Collision strategy. A facade built from ~150 boxes around real window and
+    // door openings is the right *visual* answer and the wrong collision one:
+    // it puts tens of thousands of triangles into the octree and gives the
+    // player capsule a hundred 0.1 m ledges to snag on. Unless the block is
+    // meant to be entered, its collision is a single hidden box the size of the
+    // building and every visible box is flagged out of the octree. That took
+    // the level from 79k collidable triangles to well under a fifth of it.
+    const shell = o.enterable !== true;
+    const NC = shell ? { collide: false } : undefined;
+
     const faces = [
       { n: '+z', axis: 'x', a0: x0, a1: x1, p: z1 - t / 2, out: 1 },
       { n: '-z', axis: 'x', a0: x0, a1: x1, p: z0 + t / 2, out: -1 },
@@ -253,7 +287,7 @@ export class Level {
         ops.push({ c: ex.c, w: ex.w, y: ex.y, h: ex.h });
         this._reveal(f.axis, ex.c, f.p, ex.y, ex.w, ex.h, t, f.out);
       }
-      this._wall(mat, f.axis, f.a0, f.a1, f.p, y0, H, t, ops);
+      this._wall(mat, f.axis, f.a0, f.a1, f.p, y0, H, t, ops, NC);
     }
 
     // Balcony slabs + railings, projecting 1.15 m into the street.
@@ -262,13 +296,13 @@ export class Level {
       const bw = 2.4, proj = 1.15;
       if (f.axis === 'x') {
         const pz = f.p + f.out * (proj / 2);
-        b.box(this.M.concF, c, y - 0.16, pz, bw, 0.16, proj);
+        b.box(this.M.concF, c, y - 0.16, pz, bw, 0.16, proj, 0, { collide: false });
         for (const s of [-1, 1]) b.box(trim, c + s * (bw / 2 - 0.05), y, pz, 0.1, 0.95, proj, 0, { collide: false });
         b.box(trim, c, y, f.p + f.out * proj, bw, 0.95, 0.1, 0, { collide: false });
         for (let i = -3; i <= 3; i++) b.box(this.M.rust, c + i * 0.34, y + 0.1, f.p + f.out * proj, 0.05, 0.75, 0.05, 0, { collide: false });
       } else {
         const px = f.p + f.out * (proj / 2);
-        b.box(this.M.concF, px, y - 0.16, c, proj, 0.16, bw);
+        b.box(this.M.concF, px, y - 0.16, c, proj, 0.16, bw, 0, { collide: false });
         for (const s of [-1, 1]) b.box(trim, px, y, c + s * (bw / 2 - 0.05), proj, 0.95, 0.1, 0, { collide: false });
         b.box(trim, f.p + f.out * proj, y, c, 0.1, 0.95, bw, 0, { collide: false });
       }
@@ -291,14 +325,14 @@ export class Level {
     if (!o.hollow) {
       for (let fl = Math.max(1, hf); fl <= floors; fl++) {
         b.aabb(this.M.concF, x0 + t, y0 + fl * fh - 0.25, z0 + t, x1 - t, y0 + fl * fh, z1 - t,
-          { collide: fl === Math.max(1, hf) });
+          { collide: !shell && fl === Math.max(1, hf) });
       }
       const cy0 = y0 + hf * fh;
       const inset = 2.1;
       if (w > inset * 2 + 1 && d > inset * 2 + 1) {
-        b.aabb(mat, x0 + inset, cy0, z0 + inset, x1 - inset, y0 + H, z1 - inset);
+        b.aabb(mat, x0 + inset, cy0, z0 + inset, x1 - inset, y0 + H, z1 - inset, NC);
       } else {
-        b.aabb(mat, x0 + t, cy0, z0 + t, x1 - t, y0 + H, z1 - t);
+        b.aabb(mat, x0 + t, cy0, z0 + t, x1 - t, y0 + H, z1 - t, NC);
       }
     }
 
@@ -310,20 +344,25 @@ export class Level {
         // Slab in four pieces around an opening. A hole in a reachable roof is
         // worth the extra boxes: it is a firing position down into the floor
         // below, and it is somewhere for a shaft of light to land.
-        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, hole.z0);
-        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z1, x1, roofY, z1);
-        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z0, hole.x0, roofY, hole.z1);
-        b.aabb(this.M.concF, hole.x1, roofY - 0.3, hole.z0, x1, roofY, hole.z1);
+        const RC = { collide: o.walkableRoof === true };
+        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, hole.z0, RC);
+        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z1, x1, roofY, z1, RC);
+        b.aabb(this.M.concF, x0, roofY - 0.3, hole.z0, hole.x0, roofY, hole.z1, RC);
+        b.aabb(this.M.concF, hole.x1, roofY - 0.3, hole.z0, x1, roofY, hole.z1, RC);
         P.rebar(b, this.M.steelProp, (hole.x0 + hole.x1) / 2, roofY - 0.3, hole.z0, 8, hole.x1 - hole.x0, 0.8, R);
         P.rebar(b, this.M.steelProp, hole.x1, roofY - 0.3, (hole.z0 + hole.z1) / 2, 6, hole.z1 - hole.z0, 0.7, R);
       } else {
-        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, z1);
+        b.aabb(this.M.concF, x0, roofY - 0.3, z0, x1, roofY, z1, NC);
       }
+      // Parapets stay in the octree even on shelled blocks: they are the only
+      // thing stopping a player who reaches one roof walking off onto the next.
       const pt = 0.3, ph = o.parapet ?? 0.9;
       b.aabb(mat, x0, roofY, z0, x1, roofY + ph, z0 + pt);
       b.aabb(mat, x0, roofY, z1 - pt, x1, roofY + ph, z1);
       b.aabb(mat, x0, roofY, z0 + pt, x0 + pt, roofY + ph, z1 - pt);
       b.aabb(mat, x1 - pt, roofY, z0 + pt, x1, roofY + ph, z1 - pt);
+      // The one collision volume that replaces the whole shelled facade.
+      if (shell) b.aabb(mat, x0, y0, z0, x1, roofY, z1, { collide: true, hidden: true });
       b.aabb(trim, x0 - 0.09, roofY + ph, z0 - 0.09, x1 + 0.09, roofY + ph + 0.12, z1 + 0.09, { collide: false });
       if (o.roofClutter !== false) this._roofClutter(x0 + 1.2, x1 - 1.2, z0 + 1.2, z1 - 1.2, roofY, o.walkableRoof === true);
     }
@@ -393,9 +432,10 @@ export class Level {
     const pierW = 0.9, bay = 3.4;
     const n = Math.max(2, Math.round((a1 - a0) / bay));
     const step = (a1 - a0) / n;
-    const put = (c, w, y, h, m, dd) => {
-      if (axis === 'z') b.aabb(m, p - dd / 2, y, c - w / 2, p + dd / 2, y + h, c + w / 2);
-      else b.aabb(m, c - w / 2, y, p - dd / 2, c + w / 2, y + h, p + dd / 2);
+    const put = (c, w, y, h, m, dd, noCol) => {
+      const op = noCol ? { collide: false } : undefined;
+      if (axis === 'z') b.aabb(m, p - dd / 2, y, c - w / 2, p + dd / 2, y + h, c + w / 2, op);
+      else b.aabb(m, c - w / 2, y, p - dd / 2, c + w / 2, y + h, p + dd / 2, op);
     };
     for (let i = 0; i <= n; i++) {
       const c = a0 + step * i;
@@ -411,14 +451,14 @@ export class Level {
         const y = clear + (rr * k) / 8;
         const hw = Math.sqrt(Math.max(0, rr * rr - Math.pow(y - clear, 2)));
         const sh = rr / 8 + 0.02;
-        put(c - (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth);
-        put(c + (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth);
+        put(c - (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth, true);
+        put(c + (hw + span / 2) / 2, span / 2 - hw + 0.02, y, sh, mat, depth, true);
       }
     }
     // Spandrel, first-floor slab and the wall above, pierced by small windows.
     const springTop = clear + rr;
-    put((a0 + a1) / 2, a1 - a0, springTop, 0.55, mat, depth);
-    put((a0 + a1) / 2, a1 - a0 + 0.4, springTop + 0.55, 0.3, this.M.concF, depth + 0.4);
+    put((a0 + a1) / 2, a1 - a0, springTop, 0.55, mat, depth, true);
+    put((a0 + a1) / 2, a1 - a0 + 0.4, springTop + 0.55, 0.3, this.M.concF, depth + 0.4, true);
     const wallY = springTop + 0.85;
     const ops = [];
     for (let i = 0; i < n; i++) {
@@ -426,9 +466,9 @@ export class Level {
       ops.push({ c, w: 1.2, y: wallY + 0.95, h: 1.5 });
       this._reveal(axis === 'z' ? 'z' : 'x', c, axis === 'z' ? p - depth / 2 : p - depth / 2, wallY + 0.95, 1.2, 1.5, 0.4, -1);
     }
-    this._wall(mat, axis === 'z' ? 'z' : 'x', a0, a1, p, wallY, 3.6, depth * 0.55, ops);
-    put((a0 + a1) / 2, a1 - a0 + 0.3, wallY + 3.6, 0.75, mat, depth * 0.6);
-    put((a0 + a1) / 2, a1 - a0 + 0.5, wallY + 4.35, 0.16, this.M.concF, depth * 0.7);
+    this._wall(mat, axis === 'z' ? 'z' : 'x', a0, a1, p, wallY, 3.6, depth * 0.55, ops, { collide: false });
+    put((a0 + a1) / 2, a1 - a0 + 0.3, wallY + 3.6, 0.75, mat, depth * 0.6, true);
+    put((a0 + a1) / 2, a1 - a0 + 0.5, wallY + 4.35, 0.16, this.M.concF, depth * 0.7, true);
     // Under-arcade dressing: shade, crates, a hanging lamp per bay.
     for (let i = 0; i < n; i++) {
       const c = a0 + step * (i + 0.5);
@@ -439,6 +479,10 @@ export class Level {
         b.box(this.M.steelProp, lx, clear - 1.15, lz, 0.3, 0.25, 0.3, 0, { collide: false });
       }
     }
+    // One hidden volume for the whole first-floor mass, matching how blocks
+    // are shelled: the visible arcade above head height stays out of the octree.
+    if (axis === 'z') b.aabb(mat, p - depth / 2, springTop, a0, p + depth / 2, wallY + 4.5, a1, { collide: true, hidden: true });
+    else b.aabb(mat, a0, springTop, p - depth / 2, a1, wallY + 4.5, p + depth / 2, { collide: true, hidden: true });
     for (let i = 0; i <= n; i++) this._cover(axis === 'z' ? p : a0 + step * i, axis === 'z' ? a0 + step * i : p);
   }
 
@@ -504,31 +548,48 @@ export class Level {
   //  Ground and street
   // =========================================================================
 
-  _ground() {
-    const size = 300;
-    const geo = new THREE.PlaneGeometry(size, size, 44, 44);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i), z = pos.getZ(i);
-      const inStreet = Math.abs(x) < KERB + 2;
-      const bump = Math.sin(x * 0.07) * Math.cos(z * 0.09) * 0.22 + Math.sin(x * 0.31 + z * 0.19) * 0.07;
-      const fade = Math.min(1, Math.max(0, (Math.abs(x) - KERB - 2) / 12));
-      pos.setY(i, bump * (inStreet ? 0 : fade));
-    }
-    geo.computeVertexNormals();
-    const uv = geo.attributes.uv;
-    const tile = this.M.sand.userData.tile ?? 8;
-    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * size / tile, uv.getY(i) * size / tile);
-    geo.deleteAttribute('uv1');
+  /** Shared terrain displacement, so the visual and collision meshes agree. */
+  _terrainY(x, z) {
+    if (Math.abs(x) < KERB + 2) return 0;
+    const bump = Math.sin(x * 0.07) * Math.cos(z * 0.09) * 0.22 + Math.sin(x * 0.31 + z * 0.19) * 0.07;
+    return bump * Math.min(1, (Math.abs(x) - KERB - 2) / 12);
+  }
 
-    const mesh = new THREE.Mesh(geo, this.M.sand);
-    mesh.receiveShadow = true;
-    mesh.name = 'Ground';
-    mesh.layers.enable(COLLISION_LAYER);
-    mesh.updateMatrixWorld();
-    this.root.add(mesh);
-    this.ground = mesh;
+  _ground() {
+    const build = (size, segs, mat, tileSize) => {
+      const geo = new THREE.PlaneGeometry(size.w, size.d, segs, segs);
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(size.x || 0, 0, size.z || 0);
+      const pos = geo.attributes.position;
+      for (let i = 0; i < pos.count; i++) pos.setY(i, this._terrainY(pos.getX(i), pos.getZ(i)));
+      geo.computeVertexNormals();
+      const uv = geo.attributes.uv;
+      if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * size.w / tileSize, uv.getY(i) * size.d / tileSize);
+      geo.deleteAttribute('uv1');
+      return new THREE.Mesh(geo, mat);
+    };
+
+    // The visible ground is 300 m so the horizon never shows an edge. Putting
+    // 300 m of tessellated plane into the collision octree cost ~18k triangles
+    // spanning the whole world, which is the worst possible shape for an octree
+    // — huge quads get copied into every node they touch. The collidable
+    // surface is instead a coarse mesh covering only the reachable box, sharing
+    // the same displacement function so the two never disagree underfoot.
+    const view = build({ w: 300, d: 300 }, 40, this.M.sand, this.M.sand.userData.tile ?? 8);
+    view.receiveShadow = true;
+    view.name = 'Ground';
+    view.userData.noCollide = true;
+    view.updateMatrixWorld();
+    this.root.add(view);
+    this.ground = view;
+
+    const col = build({ w: 104, d: 186, x: 0, z: 39 }, 20, this.M.sand, 8);
+    col.position.y = -0.03;
+    col.visible = false;
+    col.name = 'GroundCollision';
+    col.layers.enable(COLLISION_LAYER);
+    col.updateMatrixWorld();
+    this.root.add(col);
   }
 
   _street() {
@@ -627,6 +688,7 @@ export class Level {
     this._block({
       x0: -28, x1: -KERB, z0: 22, z1: 33.5, floors: 3, mat: this.M.plasterA,
       open: ['+x', '+z', '-z'], balcony: true, noGround: ['+x'], hollowFloors: 1,
+      enterable: true,
       doors: [{ face: '+x', c: 24.6, w: 1.6, h: 2.5 }, { face: '-z', c: -16.0, w: 1.6 }],
       extra: [
         { face: '+x', c: 28.4, w: 3.6, y: 0.02, h: 2.7 },   // shopfront
@@ -885,10 +947,11 @@ export class Level {
     b.plane(this.M.gravel, cx, 0.03, cz, c.x1 - c.x0, c.z1 - c.z0);
     b.plane(this.M.concF, cx, 0.05, cz, 6.5, 6.5, 0.4, { collide: false });
 
-    // Stall row along the west side, facing into the yard.
-    for (let i = 0; i < 4; i++) {
-      P.stall(b, this.M.woodProp, this.M.tarp, this.M.woodProp, c.x0 + 1.6, 0, c.z0 + 2.6 + i * 3.4, -Math.PI / 2, 2.8, 1.9, R);
-      this._cover(c.x0 + 2.6, c.z0 + 2.6 + i * 3.4);
+    // Loggia down the west side, with the stall row sheltering under it.
+    this._arcade(c.x0 + 1.4, c.z0 + 1.0, c.z0 + 15.0, 2.8, 2.95, 'z');
+    for (let i = 0; i < 3; i++) {
+      P.stall(b, this.M.woodProp, this.M.tarp, this.M.woodProp, c.x0 + 4.2, 0, c.z0 + 3.4 + i * 4.0, -Math.PI / 2, 2.8, 1.9, R);
+      this._cover(c.x0 + 5.2, c.z0 + 3.4 + i * 4.0);
     }
     // Continuous awning along the east side.
     for (let i = 0; i < 5; i++) {
@@ -957,7 +1020,13 @@ export class Level {
     // the opening has to subtend enough angle to show the minaret standing
     // 38 m further on at x = -11.5, which a 12.4 m span did not.
     const r = 7.2;
-    const top = 15.4;
+    // Crest height is set from the review camera, not from taste. At z = 42 the
+    // top of the frame is ~34 deg up; a 15.4 m parapet 22 m away landed at
+    // exactly 34 deg, so the gatehouse filled the whole upper quarter as one
+    // flat band and nothing could break its skyline. 13.4 m puts the crest at
+    // ~31.5 deg and leaves a band of sky for the minaret to stand in.
+    const top = 13.4;
+    const NCV = { collide: false };   // everything above the springing line
 
     // Piers.
     b.aabb(mat, -16, 0, z0, -r, springing, z1);
@@ -983,8 +1052,8 @@ export class Level {
       const y = springing + (r * (i + 0.5)) / steps;
       const hw = Math.sqrt(Math.max(0, r * r - Math.pow(y - springing, 2)));
       const sh = r / steps + 0.02;
-      b.aabb(mat, -16, y, z0, -hw, y + sh, z1);
-      b.aabb(mat, hw, y, z0, 16, y + sh, z1);
+      b.aabb(mat, -16, y, z0, -hw, y + sh, z1, NCV);
+      b.aabb(mat, hw, y, z0, 16, y + sh, z1, NCV);
       // Projecting archivolt on the south face: the arch needs an edge, or the
       // opening reads as a hole punched in a slab.
       b.aabb(this.M.brick, -hw - 0.65, y, z0 - 0.22, -hw, y + sh, z0, { collide: false });
@@ -1001,14 +1070,14 @@ export class Level {
       { c: 0, w: 3.0, y: crown + 1.0, h: 2.6 },
       { c: 4.5, w: 1.4, y: crown + 1.2, h: 1.9 },
       { c: 9.5, w: 1.4, y: crown + 1.2, h: 1.9 },
-    ]);
+    ], NCV);
     this._wall(mat, 'x', -16, 16, z1 - 0.3, crown, top - crown, 0.6, [
       { c: -9.5, w: 1.4, y: crown + 1.2, h: 1.9 },
       { c: 0, w: 3.0, y: crown + 1.0, h: 2.6 },
       { c: 9.5, w: 1.4, y: crown + 1.2, h: 1.9 },
-    ]);
-    b.aabb(mat, -16, crown, z0 + 0.6, -12, top, z1 - 0.6);
-    b.aabb(mat, 12, crown, z0 + 0.6, 16, top, z1 - 0.6);
+    ], NCV);
+    b.aabb(mat, -16, crown, z0 + 0.6, -12, top, z1 - 0.6, NCV);
+    b.aabb(mat, 12, crown, z0 + 0.6, 16, top, z1 - 0.6, NCV);
     b.aabb(this.M.concF, -16, crown, z0 + 0.6, 16, crown + 0.3, z1 - 0.6);
     for (const c of [-9.5, -4.5, 0, 4.5, 9.5]) this._reveal('x', c, z0 + 0.3, crown + 1.1, c === 0 ? 3.0 : 1.4, c === 0 ? 2.6 : 1.9, 0.6, -1);
 
@@ -1073,15 +1142,18 @@ export class Level {
 
     // --- The minaret. Offset just far enough west that a slice of it lands
     //     inside the arch opening from the spawn, which is the whole point.
-    // Placement is pure sightline maths. From the spawn at z = 42 the arch
-    // opening (z = 64.5, half-width 7.2) subtends +/-18 deg, so a landmark at
-    // 38 m has to sit inside +/-12.3 m of the centreline to show through it.
-    // x = -11.5 puts a slice of the shaft in the opening; 27 m of height puts
-    // the gallery and cap above the gatehouse roofline at 17 m. One landmark
-    // read two ways in the same frame.
-    const mx = -11.5, mz = 80.0, H = 27.0;
+    // Placement is pure sightline maths, and it is the reason this level has a
+    // vista at all. From the spawn at z = 42 the arch opening (z = 64.5,
+    // half-width 7.2) subtends +/-18 deg; x = -9.5 sits at -14 deg, so the
+    // shaft shows through the opening with room to spare. 26 m of height puts
+    // the gallery and dome at ~33 deg, in the strip of sky above the 13.4 m
+    // gatehouse crest. One landmark, read twice in the same frame: a lit slice
+    // framed by the arch, and a silhouette breaking the roofline above it.
+    // The base overhangs the kerb into the carriageway, so beyond the arch the
+    // street has to bend around it.
+    const mx = -9.5, mz = 80.0, H = 26.0;
     const mat = this.M.plasterB;
-    const gal = 17.6;                                   // muezzin's gallery
+    const gal = 16.8;                                   // muezzin's gallery
     b.box(this.M.concF, mx, 0, mz, 6.8, 0.9, 6.8);
     b.box(this.M.brick, mx, 0.9, mz, 5.6, 2.2, 5.6);
     b.box(this.M.concF, mx, 3.1, mz, 6.0, 0.3, 6.0, 0, { collide: false });
@@ -1122,7 +1194,7 @@ export class Level {
     // Mosque body at the tower's foot, with its own arcaded forecourt wall. The
     // minaret needs something to belong to or it reads as a chimney.
     this._block({ x0: -34, x1: -14.6, z0: 74, z1: 86, floors: 2, floorH: 4.2, mat: this.M.plasterB,
-      open: ['+x', '-z'], doors: [{ face: '+x', c: 80, w: 2.2, h: 3.2 }] });
+      open: ['+x', '-z'], enterable: true, hollowFloors: 1, doors: [{ face: '+x', c: 80, w: 2.2, h: 3.2 }] });
     for (let i = 0; i < 4; i++) {
       const zz = 75.6 + i * 3.0;
       b.aabb(this.M.plasterB, -14.4, 0, zz - 1.1, -13.4, 3.0, zz + 1.1);
@@ -1174,7 +1246,7 @@ export class Level {
     // The "wall" review pose stands 3.7 m off MA's east face, so that one strip
     // of facade has to survive a close read: threshold step, drain, meter box,
     // spalled render showing the block behind, a bench, a stack of tyres.
-    this._closeFacade(-24.21, 0.0, 20.0, 'z', -1);
+    this._closeFacade(-24.21, -2.0, 20.0, 'z', 1);
     P.laundry(b, this.M.wire, this.M.cloth, -23.4, 6.6, 4.0, -12.2, 6.0, 5.2, R);
     P.laundry(b, this.M.wire, this.M.cloth2, -23.4, 5.6, 11.5, -12.2, 6.4, 10.2, R);
     P.laundry(b, this.M.wire, this.M.cloth, -23.4, 8.0, 15.5, -12.2, 7.6, 16.4, R);
@@ -1205,19 +1277,23 @@ export class Level {
     // --- Alley at z -14..-9: containers, drums, fire escape, deep shade.
     // Containers hug the south wall, staggered, leaving a 3 m route along the
     // north side: cover to move between, not a plug.
-    for (const [x, z, rot, col] of [[-14.2, -12.8, Math.PI / 2 + 0.03, 0], [-22.0, -12.9, Math.PI / 2, 1], [-29.4, -12.7, Math.PI / 2 + 0.05, 0]]) {
+    for (const [x, z, rot, col] of [[-19.0, -12.9, Math.PI / 2 + 0.03, 0], [-26.0, -12.9, Math.PI / 2, 1]]) {
       this._container(col ? this.M.cBlue : this.M.cRed, x, 0, z, rot);
       this._cover(x, z + 2.4);
     }
-    this._container(this.M.cBlue, -22.0, 2.62, -12.9, Math.PI / 2 - 0.02);
-    for (let i = 0; i < 6; i++) P.oilDrum(b, this.M.steelProp, -30 + R() * 18, 0, -13.4 + R() * 1.2, R() * 3, R() < 0.25);
+    this._container(this.M.cBlue, -26.0, 2.62, -12.9, Math.PI / 2 - 0.02);
+        for (let i = 0; i < 6; i++) {
+      const dx = -30 + R() * 15, dz = -13.5 + R() * 1.0;
+      if (this._blocked(dx, dz)) continue;
+      P.oilDrum(b, this.M.steelProp, dx, 0, dz, R() * 3, R() < 0.25);
+    }
     // Fire escape on the south alley wall — climbable to a 4.2 m platform.
     this._fireEscape(-16.5, -14.0, 4.2);
 
     // Street frontage south of the square.
     P.carWreck(b, this.M.dark, this.M.dark, this.M.rust, -3.4, 0, -6.0, 0.35, R);
     this._crater(4.2, -20.0, 2.8, 0.5);
-    for (let i = 0; i < 6; i++) P.jerseyBarrier(b, this.M.conc, -8.4, 0, -24 + i * 3.6, 0.0);
+    for (let i = 0; i < 6; i++) P.jerseyBarrier(b, this.M.conc, -9.05, 0, -24 + i * 3.6, 0.0);
     for (let i = -3; i <= 2; i++) P.utilityPole(b, this.M.wood, this.M.rust, this.M.wire, -9.6, PAVE_Y, i * 8 - 2, 8.4, -0.02);
   }
 
@@ -1333,16 +1409,20 @@ export class Level {
     // exact height that masked the arch springing; it is now pulled to the west
     // kerb and swung round so it leads the eye up the street rather than
     // fencing it off. Body is a dusty cream, not container blue.
-    P.busWreck(b, this.M.busBody, this.M.dark, this.M.rust, this.M.glass, -4.1, 0, 47.5, 0.42);
-    this._cover(-2.4, 44.0); this._cover(-2.4, 51.0);
-    b.plane(this.M.scorch, -4.1, 0.055, 47.5, 7, 13, 0.42, { collide: false });
+    // Placement is measured against the review camera at (0, 1.6, 42): swung to
+    // 72 deg it reads as a bus lying diagonally across the west two-thirds of
+    // the carriageway 12 m ahead — a mid-ground silhouette you route around,
+    // clear of the arch above it and clear of the spawn behind it.
+    P.busWreck(b, this.M.busBody, this.M.dark, this.M.rust, this.M.glass, -5.4, 0, 50.0, 0.87);
+    this._cover(-1.0, 47.6); this._cover(-6.4, 53.4);
+    b.plane(this.M.scorch, -5.4, 0.055, 50.0, 13, 7, 0.87, { collide: false });
     // Debris field thrown off the bus, and one wheel well away from it.
     for (let i = 0; i < 30; i++) {
       const a = R() * Math.PI * 2, rr = 2 + R() * 6;
-      b.box(this.M.dark, -4.1 + Math.cos(a) * rr, 0.03, 47.5 + Math.sin(a) * rr,
+      b.box(this.M.dark, -5.4 + Math.cos(a) * rr, 0.03, 50.0 + Math.sin(a) * rr,
         0.16 + R() * 0.4, 0.06 + R() * 0.12, 0.16 + R() * 0.4, R() * 3, { collide: false });
     }
-    P.tyre(b, this.M.dark, 1.4, 0.02, 43.0, 1.1, true);
+    P.tyre(b, this.M.dark, 1.9, 0.02, 45.6, 1.1, true);
 
     // Crater in the near road — the "ground" pose looks straight into it.
     this._crater(2.6, 36.5, 3.4, 0.7);
@@ -1372,6 +1452,7 @@ export class Level {
       const x = s * (ROAD_HALF + 0.6 + R() * 3.0);
       const z = -28 + R() * 90;
       const r = R();
+      if (this._blocked(x, z)) continue;
       if (r < 0.22) P.oilDrum(b, this.M.steelProp, x, PAVE_Y, z, R() * 3, R() < 0.2);
       else if (r < 0.44) P.crateStack(b, this.M.woodProp, x, PAVE_Y, z, R() * 3, R);
       else if (r < 0.58) P.tyre(b, this.M.dark, x, PAVE_Y, z, R() * 3, R() < 0.5);

@@ -138,7 +138,13 @@ export function blurWrap(src, size, radius) {
  * maps reading as static.
  */
 export function heightToNormalWorld(height, size, amplitude, tileMeters, boost = 1.0) {
-  const data = new Uint8Array(size * size * 4);
+  // Two channels, not four. A tangent-space normal is a unit vector with a
+  // positive Z, so Z is fully determined by X and Y and storing it is pure
+  // waste — and the alpha next to it is waste twice over. The shader that
+  // samples this is ours (Materials.js replaces <normal_fragment_maps>
+  // outright for the detail-normal blend), so it can do the one sqrt that
+  // buys back a third of the normal map's memory.
+  const data = new Uint8Array(size * size * 2);
   const texelMeters = tileMeters / size;
   // d(height in metres) / d(distance in metres) for a 1-texel central diff
   const k = (amplitude / (2 * texelMeters)) * boost;
@@ -152,14 +158,11 @@ export function heightToNormalWorld(height, size, amplitude, tileMeters, boost =
       const xm2 = wrap(x - 2, size), xp2 = wrap(x + 2, size);
       const dx = (height[y0 + xp] - height[y0 + xm]) * k + (height[y0 + xp2] - height[y0 + xm2]) * k2;
       const dy = (height[yp + x] - height[ym + x]) * k + (height[yp2 + x] - height[ym2 + x]) * k2;
-      let nx = -dx, ny = -dy, nz = 1.0;
+      const nx = -dx, ny = -dy;
       const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
-      nx *= inv; ny *= inv; nz = inv;
-      const i = (y0 + x) * 4;
-      data[i] = (nx * 127.5 + 127.5) | 0;
-      data[i + 1] = (ny * 127.5 + 127.5) | 0;
-      data[i + 2] = (nz * 127.5 + 127.5) | 0;
-      data[i + 3] = 255;
+      const i = (y0 + x) * 2;
+      data[i] = (nx * inv * 127.5 + 127.5) | 0;
+      data[i + 1] = (ny * inv * 127.5 + 127.5) | 0;
     }
   }
   return data;
@@ -167,7 +170,12 @@ export function heightToNormalWorld(height, size, amplitude, tileMeters, boost =
 
 // ------------------------------- occlusion ---------------------------------
 
-const HAO_DIRS = 12;
+// Eight directions is the standard HBAO tap count and is where the quality
+// curve flattens: the march is O(dirs × steps) per work texel and dropping
+// from twelve to eight took a fifth off the whole library's bake with no
+// visible change in the occlusion — the result is low-frequency by
+// construction and the micro term below carries everything sharp.
+const HAO_DIRS = 8;
 const DIR_COS = new Float32Array(HAO_DIRS);
 const DIR_SIN = new Float32Array(HAO_DIRS);
 for (let i = 0; i < HAO_DIRS; i++) {
@@ -192,7 +200,7 @@ for (let i = 0; i < HAO_DIRS; i++) {
 export function horizonAO(height, size, amplitude, tileMeters, opts = {}) {
   const {
     radiusTexels = 11,
-    steps = 7,
+    steps = 6,
     strength = 1.0,
     microStrength = 0.55,
     workSize = 320,

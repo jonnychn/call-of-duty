@@ -101,21 +101,28 @@ function applyCommon(tex) {
   return tex;
 }
 
-function rgbToTexture(rgb, size) {
-  const data = new Uint8Array(size * size * 4);
-  for (let i = 0, n = size * size; i < n; i++) {
-    data[i * 4] = rgb[i * 3];
-    data[i * 4 + 1] = rgb[i * 3 + 1];
-    data[i * 4 + 2] = rgb[i * 3 + 2];
-    data[i * 4 + 3] = 255;
-  }
-  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+function rgbToTexture(rgba, size) {
+  // Generators emit RGBA directly, so this is a wrap, not a repack. It used to
+  // widen an RGB buffer here — twenty size²-element loops and twenty fresh
+  // multi-megabyte allocations, all on the main thread during load.
+  const tex = new THREE.DataTexture(rgba, size, size, THREE.RGBAFormat);
   tex.colorSpace = THREE.SRGBColorSpace;
   return applyCommon(tex);
 }
 
 function rgbaToTexture(rgba, size) {
   const tex = new THREE.DataTexture(rgba, size, size, THREE.RGBAFormat);
+  tex.colorSpace = THREE.NoColorSpace;
+  return applyCommon(tex);
+}
+
+/**
+ * Two-channel tangent-space normal. Z is reconstructed in the fragment shader
+ * (see Materials.js), so this is RG8 — half the bytes of the RGBA8 it
+ * replaces, across every material in the library.
+ */
+function normalToTexture(rg, size) {
+  const tex = new THREE.DataTexture(rg, size, size, THREE.RGFormat);
   tex.colorSpace = THREE.NoColorSpace;
   return applyCommon(tex);
 }
@@ -128,7 +135,7 @@ function toMaps(r) {
   const orm = rgbaToTexture(r.orm, r.size);
   return {
     map: rgbToTexture(r.rgb, r.size),
-    normalMap: rgbaToTexture(r.normal, r.size),
+    normalMap: normalToTexture(r.normal, r.size),
     ormMap: orm,
     aoMap: orm,
     roughnessMap: orm,
@@ -195,7 +202,7 @@ export function bakeDetailNormal(family, opts = {}) {
   const key = `${family}|${size}|${seed}|${worldSize}|${amplitude}`;
   if (detailCache.has(key)) return detailCache.get(key);
   const p = pool.run('detail', family, size, seed, { worldSize, amplitude })
-    .then((r) => rgbaToTexture(r.normal, r.size));
+    .then((r) => normalToTexture(r.normal, r.size));
   detailCache.set(key, p);
   return p;
 }

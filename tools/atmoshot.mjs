@@ -96,19 +96,59 @@ async function main() {
         e.player.velocity.set(0, 0, 0);
         e.hud?.setHealth(100);
       }, pose);
-      await page.waitForTimeout(pose.ads ? 2500 : 1400);
+
+      // Drive the frames by hand with the render loop stopped, then read the
+      // default framebuffer back with raw readPixels in the same task as the
+      // final draw.
+      //
+      // Neither page.screenshot() nor canvas.toDataURL() is trustworthy here:
+      // SwiftShader takes over a second per frame, the headless compositor
+      // hands back partially-rasterised tiles (this is what produced all the
+      // "left eighth of the frame, rest black" images), and toDataURL on a
+      // context without preserveDrawingBuffer races the presentation clear.
+      // readPixels on the default framebuffer has neither problem. It also
+      // drops the DOM HUD, which is what we want when judging lighting.
+      const dataUrl = await page.evaluate(async (frames) => {
+        const e = window.__engine;
+        e.stop();
+        for (let i = 0; i < frames; i++) {
+          e.tick();
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+        e.tick();
+
+        const gl = e.renderer.getContext();
+        const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+        const px = new Uint8Array(w * h * 4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d');
+        const id = ctx.createImageData(w, h);
+        for (let y = 0; y < h; y++) {
+          id.data.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+        }
+        for (let i = 3; i < id.data.length; i += 4) id.data[i] = 255;
+        ctx.putImageData(id, 0, 0);
+        return cv.toDataURL('image/png');
+      }, pose.ads ? 26 : 18);
+
       const file = path.join(OUT, `${tod}-${name}.png`);
-      await page.screenshot({ path: file, timeout: 180000 });
+      await writeFile(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
       written.push(file);
 
       // Histogram of the actual canvas pixels: 12 luminance buckets plus the
       // 1st/50th/99th percentile, so contrast claims can be checked.
-      const hist = await page.evaluate(() => {
-        const c = document.querySelector('canvas');
+      const hist = await page.evaluate(async (url) => {
+        const img = new Image();
+        img.src = url;
+        await img.decode();
         const s = document.createElement('canvas');
         s.width = 256; s.height = 144;
         const g = s.getContext('2d');
-        g.drawImage(c, 0, 0, s.width, s.height);
+        g.drawImage(img, 0, 0, s.width, s.height);
         const d = g.getImageData(0, 0, s.width, s.height).data;
         const bins = new Array(12).fill(0);
         const lums = [];
@@ -125,15 +165,25 @@ async function main() {
           p01: +q(0.01).toFixed(3), p50: +q(0.50).toFixed(3),
           p99: +q(0.99).toFixed(3), mean: +(lums.reduce((a, b) => a + b, 0) / n).toFixed(3),
         };
-      });
+      }, dataUrl);
       console.log(`${tod}/${name}`, JSON.stringify(hist));
     }
   }
 
+  // renderer.info auto-resets on every internal render() call, so after a
+  // composer frame it only describes the last pass. Freeze it for one tick.
   const stats = await page.evaluate(() => {
-    const e = window.__engine;
-    return { fps: Math.round(e.fps), calls: e.renderer.info.render.calls,
-             tris: e.renderer.info.render.triangles, programs: e.renderer.info.programs?.length ?? 0 };
+    const e = window.__engine, r = e.renderer;
+    r.info.autoReset = false;
+    r.info.reset();
+    e.tick();
+    const s = {
+      calls: r.info.render.calls, tris: r.info.render.triangles,
+      programs: r.info.programs?.length ?? 0,
+      textures: r.info.memory.textures, geometries: r.info.memory.geometries,
+    };
+    r.info.autoReset = true;
+    return s;
   });
   console.log('stats', JSON.stringify(stats));
   if (errors.length) {

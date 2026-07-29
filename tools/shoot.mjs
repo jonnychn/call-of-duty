@@ -11,7 +11,7 @@
 
 import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const args = Object.fromEntries(
@@ -51,11 +51,11 @@ const POSES = {
   courtyard:   { pos: [22, 1.6, 47], yaw: 195, pitch: 3 },      // market yard + stair
   shopFront:   { pos: [-4.5, 1.6, 28.4], yaw: 90, pitch: 0 },   // shopfront from the road
   shopIn:      { pos: [-13.5, 1.6, 28.6], yaw: 110, pitch: -2 },// inside the shop
-  rooftop:     { pos: [16, 8.0, 24], yaw: 145, pitch: -8 },     // east roof over the street
+  rooftop:     { pos: [16, 8.2, 24], yaw: 145, pitch: -8 },     // east roof (deck at 6.6 m)
   market:      { pos: [-18, 1.6, 1], yaw: 178, pitch: 2 },      // southern square
-  alleyDeep:   { pos: [-24, 1.6, -11.5], yaw: 270, pitch: 0 },  // alley toward the street
+  alleyDeep:   { pos: [-24, 1.6, -10.3], yaw: 270, pitch: 0 },  // alley toward the street
   minaret:     { pos: [-2, 1.6, 86], yaw: 165, pitch: 14 },     // far quarter landmark
-  terrace:     { pos: [27.5, 7.0, 58], yaw: 215, pitch: -6 },   // courtyard terrace
+  terrace:     { pos: [27.5, 8.1, 58], yaw: 215, pitch: -6 },   // courtyard terrace (slab at 6.46 m)
 
   // --- weapon poses -------------------------------------------------------
   wpnHip:      { pos: [0, 1.6, 44], yaw: 178, pitch: 0 },        // hip framing
@@ -74,8 +74,68 @@ const SHOT_SETS = {
   all: Object.keys(POSES),
 };
 
+// ---------------------------------------------------------------------------
+// Global render lock.
+//
+// SwiftShader saturates every core it can reach. Several agents screenshotting
+// at once drove this box to load average 23 on 4 cores, at which point a single
+// 1000x560 frame took ~3 minutes and some came back part-rendered — which reads
+// as a lighting bug and is not one. One run at a time is dramatically faster in
+// wall-clock terms than N runs fighting each other, so instances queue here
+// rather than competing.
+// ---------------------------------------------------------------------------
+
+const LOCK = '/tmp/cod-shoot.lock';
+const LOCK_STALE_MS = 15 * 60 * 1000;
+
+async function acquireLock() {
+  if (args.nolock) return () => {};
+  const started = Date.now();
+  for (;;) {
+    try {
+      // Atomic: fails if the file already exists.
+      writeFileSync(LOCK, `${process.pid} ${Date.now()}\n`, { flag: 'wx' });
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        try { unlinkSync(LOCK); } catch { /* already gone */ }
+      };
+      // A crashed run must not wedge every other agent forever.
+      process.on('exit', release);
+      process.on('SIGINT', () => { release(); process.exit(130); });
+      process.on('SIGTERM', () => { release(); process.exit(143); });
+      return release;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // Reap a lock whose owner died without cleaning up.
+      try {
+        const [pid, at] = readFileSync(LOCK, 'utf8').trim().split(/\s+/);
+        const age = Date.now() - Number(at);
+        let alive = true;
+        try { process.kill(Number(pid), 0); } catch { alive = false; }
+        if (!alive || age > LOCK_STALE_MS) {
+          console.log(`[shoot] clearing stale lock from pid ${pid}`);
+          unlinkSync(LOCK);
+          continue;
+        }
+      } catch { /* lock vanished under us; just retry */ }
+
+      if (Date.now() - started > LOCK_STALE_MS) {
+        throw new Error('timed out waiting for the render lock');
+      }
+      if (!acquireLock.warned) {
+        console.log('[shoot] another render is in progress, queueing...');
+        acquireLock.warned = true;
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
+  const releaseLock = await acquireLock();
 
   // The sandbox ships a preinstalled Chromium that may not match the revision
   // this Playwright build expects; prefer it over a download when present.
@@ -162,6 +222,7 @@ async function main() {
 
   await writeFile(path.join(OUT, 'report.json'), JSON.stringify({ stats, errors, written, tod: TOD, quality: QUALITY }, null, 2));
   await browser.close();
+  releaseLock();
   process.exit(errors.length ? 2 : 0);
 }
 

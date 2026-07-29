@@ -5,6 +5,7 @@ import { settings } from '../core/Settings.js';
 import { lighting } from './LightingState.js';
 import { patchAerialPerspective, aerialUniforms } from './AerialPerspective.js';
 import { patchSky } from './SkyShader.js';
+import { patchSoftShadows } from './SoftShadows.js';
 
 // ---------------------------------------------------------------------------
 // Sky, sun, image-based lighting, cascaded shadows and aerial perspective.
@@ -171,6 +172,7 @@ export class Atmosphere {
     // Global shader surgery. Both are idempotent and must happen before any
     // material compiles.
     patchAerialPerspective();
+    if (settings.softShadows) patchSoftShadows();
 
     this.sky = new Sky();
     this.sky.scale.setScalar(45000);

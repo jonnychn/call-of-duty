@@ -165,9 +165,16 @@ function lerp3(out, a, b, t) {
   return out;
 }
 
+// The albedo plane is RGBA, not RGB, even though nothing reads the alpha.
+// WebGL stores it as RGBA either way, so an RGB buffer only means the main
+// thread has to repack size² texels into a fresh array before it can make a
+// texture — twenty times, on the thread that is trying to show a first frame.
+// Emitting RGBA in the worker makes the handover a zero-copy buffer transfer.
 function planes(size) {
+  const rgb = new Uint8Array(size * size * 4);
+  for (let i = 3; i < rgb.length; i += 4) rgb[i] = 255;
   return {
-    rgb: new Uint8Array(size * size * 3),
+    rgb,
     height: new Float32Array(size * size),
     rough: new Float32Array(size * size),
     metal: new Float32Array(size * size),
@@ -175,9 +182,9 @@ function planes(size) {
 }
 
 function writeRGB(rgb, i, r, g, b) {
-  rgb[i * 3] = clamp01(r) * 255;
-  rgb[i * 3 + 1] = clamp01(g) * 255;
-  rgb[i * 3 + 2] = clamp01(b) * 255;
+  rgb[i * 4] = clamp01(r) * 255;
+  rgb[i * 4 + 1] = clamp01(g) * 255;
+  rgb[i * 4 + 2] = clamp01(b) * 255;
 }
 
 // ===========================================================================
@@ -766,11 +773,25 @@ const SURFACES = {
   // -------------------------------------------------------------------------
   /**
    * Brickwork in running bond with struck mortar joints. Macro: soot, damp
-   * and whole-region firing variation. Meso: per-brick colour and height from
-   * the cell id, chipped arrises, sandy mortar. Micro: clay grain.
+   * and whole-region firing variation. Meso: per-brick colour, size and set
+   * from the cell id, chipped arrises, raked and blown mortar. Micro: clay
+   * grain and iron spotting.
    *
-   * The one thing that instantly kills procedural brick is every brick being
-   * the same colour, so the per-brick hash drives tone harder than anything.
+   * Three things decide whether procedural brickwork reads as masonry:
+   *
+   *   * SIZE. A brick is 215 × 65 mm. Laying eight courses across a 2.4 m tile
+   *     gives 300 mm blocks, and blockwork at brick colour reads as a cartoon
+   *     of a wall — this was the single most damaging error in the first pass.
+   *     Twenty-four courses of eight puts it within a centimetre of a real
+   *     stretcher, and the joint at ~12 mm still survives a 512² bake.
+   *
+   *   * IRREGULARITY. Bricks are not identical and bricklayers are not CNC
+   *     machines. Every brick gets its own length, height and set within the
+   *     course, so no two joints are the same width and the perpends wander —
+   *     which is what a uniform grid can never fake.
+   *
+   *   * The per-brick hash drives tone harder than anything else. Every brick
+   *     the same colour is the other instant tell.
    */
   brick: {
     amplitude: 0.014, tile: 3.0, detail: 'grain',
@@ -783,54 +804,101 @@ const SURFACES = {
       const sootB = band(MACRO, (u, v) => warpFbm2(u * 3, v * 3, { octaves: 4, period: 3, warp: 0.7, warpFreq: 1 }));
       const dampB = band(48, (u, v) => fbm2(u * 3 + 6, v * 2, { octaves: 3, period: 3 }));
       const firingB = band(32, (u, v) => fbm2(u * 2 + 3, v * 2 + 9, { octaves: 3, period: 2 }));
-      const chipB = band(M, (u, v) => ridged2(u * 70, v * 70, { octaves: 2, period: 70 }));
+      const chipB = band(M, (u, v) => ridged2(u * 90, v * 90, { octaves: 2, period: 90 }));
+      // where the pointing has failed and fallen out — sparse, patchy, and the
+      // difference between "a wall" and "a wall that has stood for fifty years"
+      const lossB = band(48, (u, v) => fbm2(u * 7 + 21, v * 7 + 4, { octaves: 3, period: 7 }));
       const c = [0, 0, 0];
-      const mortarC = [0.500, 0.482, 0.448];
+      // Lime mortar is not white. Pitching it near the brick's own value is
+      // what keeps the wall reading as one material instead of a red grid on
+      // a pale sheet — the joints should be found by the eye, not announced.
+      const mortarC = [0.395, 0.378, 0.348];
       const darkBrick = [0.180, 0.086, 0.062];
       const paleBrick = [0.520, 0.330, 0.235];
       const freshClay = [0.560, 0.360, 0.270];
       const mic = micro(seed + 9);
 
-      const ROWS = 8, COLS = 4, JOINT = 0.055;
+      // 24 courses × 8 stretchers over a 2.4 m tile = 300 × 100 mm modules,
+      // i.e. a 288 × 88 mm brick in a 12 mm bed. Slightly generous against a
+      // real 215 × 65, but a true brick would put the joint under two texels
+      // at the 512² the pale variant bakes at, and a joint that thin aliases
+      // into a dotted line the moment the wall is seen at an angle.
+      const ROWS = 24, COLS = 8, JOINT = 0.040;
+      const ASPECT = COLS / ROWS;
 
       for (let y = 0; y < size; y++) {
         const v = y / size;
         const row = Math.floor(v * ROWS);
         const fy = v * ROWS - row;
+        // courses are laid to a line but the line is a string, not a laser
+        const courseShift = (hash2(0, row, seed + 913) - 0.5) * 0.22;
         for (let x = 0; x < size; x++) {
           const i = y * size + x;
           const u = x / size;
-          const ux = u * COLS + ((row & 1) ? 0.5 : 0.0);
+          const ux = u * COLS + ((row & 1) ? 0.5 : 0.0) + courseShift * ASPECT;
           const col = Math.floor(ux);
           const fx = ux - col;
 
           const bid = hash2(col, row, seed);
           const bid2 = hash2(col, row, seed + 77);
+          const bid3 = hash2(col, row, seed + 311);
+          const bid4 = hash2(col, row, seed + 503);
 
-          const wobble = (mB(mic, x * 3, y * 3) - 0.5) * 0.030;
-          const dxj = Math.min(fx, 1 - fx) + wobble;
-          const dyj = Math.min(fy, 1 - fy) * (COLS / ROWS) + wobble;
+          // Per-brick footprint: its own length, its own height, and its own
+          // set within the course. Because neighbouring bricks jitter
+          // independently, every perpend ends up a different width — which is
+          // the whole point.
+          const halfW = 0.5 - JOINT * (0.72 + bid3 * 0.85);
+          const halfH = 0.5 - (JOINT / ASPECT) * (0.72 + bid4 * 0.85);
+          const setX = (bid3 - 0.5) * 0.10;
+          const setY = (bid4 - 0.5) * 0.09;
+
+          // the joint edge is eaten into by the mortar's own sand grain
+          const wobble = (mB(mic, x * 3, y * 3) - 0.5) * 0.026;
+          const dxj = (halfW - Math.abs(fx - 0.5 - setX)) + wobble;
+          const dyj = (halfH - Math.abs(fy - 0.5 - setY)) * ASPECT + wobble * 0.7;
           const dj = Math.min(dxj, dyj);
-          const isMortar = 1 - smoothstep(JOINT * 0.55, JOINT * 1.25, dj);
-          const arris = smoothstep(JOINT * 1.1, JOINT * 3.2, dj);
+          // signed: negative inside the joint, positive on the brick face
+          const isMortar = 1 - smoothstep(-JOINT * 0.10, JOINT * 0.24, dj);
+          const arris = smoothstep(JOINT * 0.20, JOINT * 1.5, dj);
+          // how deep into the joint we are, 0 at the arris to 1 at the centre
+          const jt = clamp01(-dj / (JOINT * 0.95));
 
           // offsetting the micro lookup per brick means no two bricks share
           // the same grain, which is most of what stops brickwork looking stamped
           const clay = mA(mic, x + ((bid * 211) | 0), y + ((bid2 * 197) | 0));
-          const chip = smoothstep(0.72, 0.95, bs(chipB, u, v)) * (1 - arris) * (1 - isMortar);
+          // chips take the arris, not the middle of the face — a brick wears
+          // at its corners because that is what anything passing hits
+          const chip = smoothstep(0.66, 0.93, bs(chipB, u, v)) * (1 - arris) * (1 - isMortar);
           const mortarSand = mB(mic, x + 71, y + 113);
+          const loss = smoothstep(0.60, 0.80, bs(lossB, u, v)) * isMortar;
+          // iron spots: the dark vitrified flecks of an underfired brick
+          scatter2(u * 190, v * 190 * (ROWS / COLS), 190, seed + 61, CELL);
+          const spot = CELL[1] > 0.86 && CELL[0] < 0.30
+            ? (1 - smoothstep(0.10, 0.30, CELL[0])) * (1 - isMortar) : 0;
 
-          const brickH = 0.72 + (bid - 0.5) * 0.10 + arris * 0.10 + (clay - 0.5) * 0.10 - chip * 0.35;
-          const mortarH = 0.30 + (mortarSand - 0.5) * 0.12;
+          const brickH = 0.76 + (bid - 0.5) * 0.09 + arris * 0.06 + (clay - 0.5) * 0.10 - chip * 0.42;
+          // a struck joint is concave, not a flat step, and where the pointing
+          // has gone it drops away to nothing
+          const mortarH = 0.40 - jt * jt * 0.16 + (mortarSand - 0.5) * 0.13 - loss * 0.34;
           height[i] = clamp01(mix(brickH, mortarH, isMortar));
 
           const bt = clamp01(bid2 * 0.8 + bs(firingB, u, v) * 0.5 - 0.15);
           if (bt < 0.5) lerp3(c, darkBrick, base, bt * 2);
           else lerp3(c, base, paleBrick, (bt - 0.5) * 2);
-          const sh = 0.86 + (clay - 0.5) * 0.30 + arris * 0.10;
+          // A brick fired in a kiln cools unevenly, so its face carries a
+          // gradient — one end darker than the other, in a direction that is
+          // different for every brick. Without it each brick is a flat fill
+          // and the wall reads as coloured tiles however good the grain is.
+          const ramp = (fx - 0.5) * (bid3 - 0.5) + (fy - 0.5) * (bid4 - 0.5);
+          const sh = 0.86 + (clay - 0.5) * 0.44 + arris * 0.10 + ramp * 0.46;
           c[0] *= sh; c[1] *= sh; c[2] *= sh;
           lerp3(c, c, freshClay, chip * 0.7);
-          const ms = 0.82 + (mortarSand - 0.5) * 0.34;
+          const sk = spot * 0.55;
+          c[0] *= 1 - sk; c[1] *= 1 - sk * 0.92; c[2] *= 1 - sk * 0.84;
+          // joints are pointed on different days out of different sand
+          const ms = (0.78 + (mortarSand - 0.5) * 0.42 + (bs(dampB, u, v) - 0.5) * 0.36)
+            * (1 - loss * 0.45);
           MORTAR[0] = mortarC[0] * ms; MORTAR[1] = mortarC[1] * ms; MORTAR[2] = mortarC[2] * ms;
           lerp3(c, c, MORTAR, isMortar);
           const so = smoothstep(0.52, 0.92, bs(sootB, u, v)) * 0.42;
@@ -839,9 +907,13 @@ const SURFACES = {
           c[0] *= 1 - dp * 0.55; c[1] *= 1 - dp * 0.55; c[2] *= 1 - dp * 0.48;
           writeRGB(rgb, i, c[0], c[1], c[2]);
 
-          // fired clay has a faint vitrified sheen; mortar is dead matte
-          let r = 0.74 + (clay - 0.5) * 0.16 - (bid - 0.5) * 0.10;
+          // Roughness carries the firing: an overfired brick is half-vitrified
+          // and almost glossy, an underfired one is a sponge. Mortar is dead
+          // matte, and blown pointing is rawer still.
+          let r = 0.80 - bid2 * 0.30 + (clay - 0.5) * 0.16;
+          r = mix(r, 0.52, spot * 0.8);
           r = mix(r, 0.95, isMortar);
+          r = mix(r, 0.99, loss);
           r = mix(r, 0.92, chip);
           rough[i] = clamp01(mix(r, 0.48, dp));
           metal[i] = 0;

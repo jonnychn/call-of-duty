@@ -125,21 +125,25 @@ const DETAIL_NORMAL = /* glsl */`
 
 #elif defined( USE_NORMALMAP_TANGENTSPACE )
 
-	vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
-	mapN.xy *= normalScale;
+	// Both normal maps are two-channel (RG8) — Z is implied by the vector being
+	// unit length with a positive Z, so storing it would be a third of the
+	// map's memory spent on a value one sqrt recovers exactly.
+	vec2 mapXY = texture2D( normalMap, vNormalMapUv ).xy * 2.0 - 1.0;
+	mapXY *= normalScale;
 
 	// Detail normal, sampled at a much tighter repeat and faded out with
 	// distance so it never becomes shimmering sub-pixel noise at range.
 	float dFade = 1.0 - smoothstep( uDetailFade.x, uDetailFade.y, length( vViewPosition ) );
 	if ( dFade > 0.002 ) {
-		vec3 dN = texture2D( uDetailMap, vNormalMapUv * uDetailScale ).xyz * 2.0 - 1.0;
-		// Whiteout / partial-derivative blend: sum the tangent-space slopes and
-		// keep the base Z. Slerping the two vectors instead would let the
-		// detail flatten the base normal wherever the detail is near-flat.
-		mapN = vec3( mapN.xy + dN.xy * ( uDetailStrength * dFade ), mapN.z );
+		vec2 dXY = texture2D( uDetailMap, vNormalMapUv * uDetailScale ).xy * 2.0 - 1.0;
+		// Whiteout / partial-derivative blend: sum the tangent-space slopes.
+		// Slerping the two vectors instead would let the detail flatten the
+		// base normal wherever the detail is near-flat.
+		mapXY += dXY * ( uDetailStrength * dFade );
 	}
 
-	normal = normalize( tbn * normalize( mapN ) );
+	vec3 mapN = vec3( mapXY, sqrt( max( 1e-4, 1.0 - dot( mapXY, mapXY ) ) ) );
+	normal = normalize( tbn * mapN );
 
 #elif defined( USE_BUMPMAP )
 
@@ -176,6 +180,19 @@ function installDetail(mat, detailMap, params) {
   // Every material injects the identical source, so they can all share one
   // compiled program — the per-material differences are uniforms only.
   mat.customProgramCacheKey = () => 'surfaceDetail';
+  // `Material.clone()` carries neither `onBeforeCompile` nor a live texture in
+  // `userData` (it JSON-clones that), so a plain clone of a library material
+  // silently loses the detail layer — and, now that the normal maps are RG8,
+  // would read a green channel as Z and shade the surface with a garbage
+  // normal. Anything outside this file that clones a material (the world
+  // builder's tinted variants, for one) has no way to know that, so the repair
+  // belongs here rather than at every call site.
+  mat.clone = function () {
+    const c = THREE.MeshStandardMaterial.prototype.clone.call(this);
+    installDetail(c, this.detailMap, { ...this.userData.detailParams });
+    c.userData.tile = this.userData.tile;
+    return c;
+  };
   return mat;
 }
 
@@ -260,9 +277,11 @@ export class MaterialLibrary {
       this.materials[key] = mat;
 
       const s = MaterialLibrary.sizeFor(def);
-      bytes += s * s * 4 * 3 * 1.34;      // albedo + normal + ORM, with mips
+      // albedo RGBA8 + normal RG8 + packed ORM RGBA8 = 10 bytes/texel, ×4/3
+      // for the mip chain
+      bytes += s * s * 10 * 1.34;
     }
-    bytes += 512 * 512 * 4 * 1.34 * families.length;
+    bytes += 512 * 512 * 2 * 1.34 * families.length;
 
     const ms = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
     this.stats = {
@@ -319,10 +338,8 @@ export class MaterialLibrary {
       }
       mat[slot] = c;
     }
-    // clone() drops onBeforeCompile and JSON-clones userData, so the detail
-    // layer has to be put back or the clone silently loses its micro-normal.
-    installDetail(mat, base.detailMap, { ...base.userData.detailParams });
-    mat.userData.tile = tile;
+    // clone() is overridden in installDetail() to carry the detail layer and
+    // the tile size across, so there is nothing to restore here.
     mat.name = `${name}@${rx}x${ry}`;
     mat.needsUpdate = true;
     this._tileCache.set(cacheKey, mat);
