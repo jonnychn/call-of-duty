@@ -526,7 +526,12 @@ export class Level {
       }
       // Contact darkening where the wall meets the ground. The street frontages
       // stand on the raised pavement; everything else on bare dirt.
-      const gy = (f.axis === 'z' && Math.abs(f.p) < KERB + 0.4) ? PAVE_Y + 0.012 : 0.04;
+      // Street frontages stand on the raised pavement; everything else on dirt,
+      // which is gently displaced, so the contact quad has to follow it or it
+      // buries itself in a rise.
+      const gy = (f.axis === 'z' && Math.abs(f.p) < KERB + 0.4)
+        ? PAVE_Y + 0.012
+        : Math.max(0.05, this._terrainY(f.axis === 'x' ? cmid : f.p, f.axis === 'x' ? f.p : cmid) + 0.05);
       this._contactRun(f.axis, f.p, f.out, f.a0, f.a1, 0.66, 0.8, y0 + gy);
     }
 
@@ -1150,7 +1155,21 @@ export class Level {
       const sh = r / steps + 0.01;
       b.aabb(mat, x0, y, z0, x1, y + sh, cz - hw);
       b.aabb(mat, x0, y, cz + hw, x1, y + sh, z1);
+      // Vault soffit: the gate is a short tunnel and has to read as one.
+      const iv = this._g(0.44 + 0.3 * (hw / r));
+      for (const s of [-1, 1]) {
+        const zq = cz + s * (hw - 0.02);
+        b.quad(this.M.ao, [x0, y, zq], [x1, y, zq], [x1, y + sh, zq], [x0, y + sh, zq],
+          [iv, iv, iv, iv], (x1 - x0) / 1.5, sh / 1.5);
+      }
     }
+    // Passage walls and the ground under them.
+    for (const s of [-1, 1]) {
+      this._stain('x', cz + s * (r - 0.02), -s, (x0 + x1) / 2, springing, springing, x1 - x0, 0.54, 0.42);
+      this._contactRun('x', cz + s * r, -s, x0, x1, 0.58, 0.8, 0.075);
+    }
+    this._chip(x0 - 0.05, 0.3, cz - r - 0.1, 4, 1.0);
+    this._chip(x0 - 0.05, 0.3, cz + r + 0.1, 4, 1.0);
     b.aabb(mat, x0, springing + r, z0, x1, 9.9, z1);
     b.aabb(this.M.concF, x0, 9.9, z0, x1, 10.2, z1);
     b.aabb(mat, x0, 10.2, z0, x1, 11.0, z0 + 0.3);

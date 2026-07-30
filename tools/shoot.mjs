@@ -67,6 +67,20 @@ const POSES = {
   minaret:     { pos: [-2, 1.6, 86], yaw: 165, pitch: 14 },     // far quarter landmark
   terrace:     { pos: [27.5, 8.1, 58], yaw: 215, pitch: -6 },   // courtyard terrace (slab at 6.46 m)
 
+  // --- material close-ups -------------------------------------------------
+  // Nose-to-nose framings, ~1-2 m from the surface. The `materials` set looks
+  // at whole walls and floors, which judges tiling and value range but cannot
+  // judge whether the micro detail survives at the distance a player actually
+  // fights at.
+  matBrick:    { pos: [-8.9, 1.5, 37.2], yaw: 270, pitch: 0 },   // brick facade, +x face
+  matRoad:     { pos: [0, 1.15, 21.4], yaw: 180, pitch: -46 },   // road + painted markings
+  matGravel:   { pos: [-18, 1.15, 2.5], yaw: 178, pitch: -52 },  // market gravel
+  matPave:     { pos: [4, 1.15, 31], yaw: 190, pitch: -55 },     // pavement concrete
+  matWood:     { pos: [-11.3, 1.25, 25.6], yaw: 245, pitch: -12 }, // shop timber
+  matTarp:     { pos: [-8.2, 1.5, 28.4], yaw: 268, pitch: 26 },  // awning canvas underside
+  matGlass:    { pos: [-5.2, 1.6, 28.4], yaw: 268, pitch: 4 },   // shopfront glazing
+  matRust:     { pos: [-8.4, 1.4, -13.6], yaw: 150, pitch: -4 }, // container / steel
+
   // --- weapon poses -------------------------------------------------------
   wpnHip:      { pos: [0, 1.6, 44], yaw: 178, pitch: 0 },        // hip framing
   wpnAds:      { pos: [0, 1.6, 44], yaw: 178, pitch: 0, ads: true },
@@ -79,6 +93,7 @@ const SHOT_SETS = {
   default: ['street', 'alley', 'vista', 'containers', 'weapon', 'sunGlare'],
   quick: ['street', 'weapon'],
   materials: ['ground', 'wall', 'containers'],
+  matClose: ['matBrick', 'matRoad', 'matGravel', 'matPave', 'matWood', 'matTarp', 'matGlass', 'matRust'],
   level: ['street', 'arch', 'courtyard', 'shopFront', 'shopIn', 'rooftop', 'market', 'alleyDeep'],
   level2: ['throughArch', 'minaret', 'terrace', 'vista', 'alley', 'sunGlare'],
   weapons: ['wpnHip', 'wpnAds', 'wpnSky', 'wpnSkyAds', 'wpnDark'],
