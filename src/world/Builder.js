@@ -1,0 +1,275 @@
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+
+// ---------------------------------------------------------------------------
+// GeometryBuilder — accumulates static level geometry into per-material,
+// per-spatial-chunk buckets and merges each bucket into a single mesh.
+//
+// Two things this buys us:
+//
+//  1. Draw calls stay proportional to (materials x occupied chunks) instead of
+//     to the number of boxes, so the level can be dressed as densely as it
+//     needs to be.
+//  2. UVs are generated in *world* units at authoring time, so a 20 m wall and
+//     the 0.4 m kerb beside it have identical texel density with no per-mesh
+//     material clones. This is the single biggest tell of amateur work and it
+//     is free if you never let a 0..1 box UV survive.
+// ---------------------------------------------------------------------------
+
+const CHUNK = 44;
+
+/** Face order of THREE.BoxGeometry: +X, -X, +Y, -Y, +Z, -Z (4 verts each). */
+function worldUvBox(w, h, d, tile, ox, oy, oz) {
+  const g = new THREE.BoxGeometry(w, h, d);
+  const uv = g.attributes.uv;
+  const spans = [
+    [d, h, oz, oy], [d, h, oz, oy],
+    [w, d, ox, oz], [w, d, ox, oz],
+    [w, h, ox, oy], [w, h, ox, oy],
+  ];
+  for (let f = 0; f < 6; f++) {
+    const [su, sv, uo, vo] = spans[f];
+    for (let i = 0; i < 4; i++) {
+      const k = f * 4 + i;
+      uv.setXY(k, uv.getX(k) * su / tile + uo / tile, uv.getY(k) * sv / tile + vo / tile);
+    }
+  }
+  uv.needsUpdate = true;
+  g.deleteAttribute('uv1');
+  return g;
+}
+
+/** Scales an arbitrary geometry's 0..1-ish UVs into world units. */
+function scaleUv(g, su, sv) {
+  const uv = g.attributes.uv;
+  if (!uv) return g;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * su, uv.getY(i) * sv);
+  uv.needsUpdate = true;
+  g.deleteAttribute('uv1');
+  return g;
+}
+
+export class GeometryBuilder {
+  /**
+   * @param {import('../render/Materials.js').MaterialLibrary} materials
+   */
+  constructor(materials) {
+    this.materials = materials;
+    /** @type {Map<string, {mat: THREE.Material, tile: number, geos: THREE.BufferGeometry[], collide: boolean, chunk: string}>} */
+    this.buckets = new Map();
+    this._fallbacks = new Map();
+    this._m4 = new THREE.Matrix4();
+    this._q = new THREE.Quaternion();
+    this._e = new THREE.Euler();
+    this.stats = { boxes: 0 };
+  }
+
+  /**
+   * Resolves a material name against the shared library, falling back to a
+   * locally-defined MeshStandardMaterial when another agent has not added that
+   * surface yet. `tile` is the world size of one texture repeat.
+   */
+  mat(name, fallback) {
+    if (this.materials.materials[name]) return this.materials.get(name);
+    if (!fallback) return this.materials.get('concreteWall');
+    if (!this._fallbacks.has(name)) {
+      const m = new THREE.MeshStandardMaterial({
+        color: fallback.color,
+        roughness: fallback.roughness ?? 0.92,
+        metalness: fallback.metalness ?? 0,
+        side: fallback.side ?? THREE.FrontSide,
+        transparent: fallback.transparent ?? false,
+        opacity: fallback.opacity ?? 1,
+      });
+      m.name = name;
+      m.userData.tile = fallback.tile ?? 2;
+      this._fallbacks.set(name, m);
+    }
+    return this._fallbacks.get(name);
+  }
+
+  /**
+   * A tinted variant of an existing library surface. Cheaper and far better
+   * looking than a flat colour: the maps (and therefore the normal, roughness
+   * and AO detail) are shared, only the base colour multiplier differs. Used
+   * for charred metal, hessian sandbags and sun-bleached cloth, none of which
+   * warrant their own texture bake.
+   */
+  tinted(name, source, color, opts) {
+    if (this._fallbacks.has(name)) return this._fallbacks.get(name);
+    const src = this.materials.materials[source];
+    let m;
+    if (src) {
+      m = src.clone();
+      m.color = new THREE.Color(color);
+      if (opts?.roughness !== undefined) m.roughness = opts.roughness;
+      if (opts?.metalness !== undefined) m.metalness = opts.metalness;
+      if (opts?.side) m.side = opts.side;
+      m.userData.tile = opts?.tile ?? src.userData.tile ?? 2;
+    } else {
+      m = new THREE.MeshStandardMaterial({ color, roughness: opts?.roughness ?? 0.92, side: opts?.side ?? THREE.FrontSide });
+      m.userData.tile = opts?.tile ?? 2;
+    }
+    m.name = name;
+    this._fallbacks.set(name, m);
+    return m;
+  }
+
+  _key(mat, collide, hidden, x, z, shadow, vc) {
+    const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);
+    return `${mat.name || mat.uuid}|${collide ? 'c' : 'n'}${hidden ? 'h' : ''}${shadow ? 's' : ''}${vc ? 'v' : ''}|${cx},${cz}`;
+  }
+
+  _push(mat, geo, collide, x, z, hidden, shadow = true, vc = false) {
+    const key = this._key(mat, collide, hidden, x, z, shadow, vc);
+    let b = this.buckets.get(key);
+    if (!b) { b = { mat, geos: [], collide, hidden, shadow, vc }; this.buckets.set(key, b); }
+    b.geos.push(geo);
+  }
+
+  /**
+   * Axis-aligned-ish box. x/z are the footprint centre, y is the BASE (floor)
+   * height, w/h/d are full extents. rotY rotates about the footprint centre.
+   */
+  box(mat, x, y, z, w, h, d, rotY = 0, opts) {
+    if (w <= 0 || h <= 0 || d <= 0) return;
+    const tile = mat.userData.tile ?? 2;
+    const g = worldUvBox(w, h, d, tile, x - w / 2, y, z - d / 2);
+    if (rotY) {
+      this._e.set(0, rotY, 0);
+      this._q.setFromEuler(this._e);
+      this._m4.compose(new THREE.Vector3(x, y + h / 2, z), this._q, new THREE.Vector3(1, 1, 1));
+    } else {
+      this._m4.makeTranslation(x, y + h / 2, z);
+    }
+    g.applyMatrix4(this._m4);
+    this.stats.boxes++;
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow !== false);
+  }
+
+  /**
+   * Box with a free rotation. Used for the handful of things that must not be
+   * dimensionally perfect — leaning T-walls, sagging awning slats, spalled
+   * copings. Same world-projected UVs as `box`.
+   */
+  tilted(mat, x, y, z, w, h, d, rot, opts) {
+    if (w <= 0 || h <= 0 || d <= 0) return;
+    const tile = mat.userData.tile ?? 2;
+    const g = worldUvBox(w, h, d, tile, x - w / 2, y, z - d / 2);
+    this._e.set(rot.x || 0, rot.y || 0, rot.z || 0);
+    this._q.setFromEuler(this._e);
+    this._m4.compose(new THREE.Vector3(x, y + h / 2, z), this._q, new THREE.Vector3(1, 1, 1));
+    g.applyMatrix4(this._m4);
+    this.stats.boxes++;
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow !== false);
+  }
+
+  /** Box specified by min/max corners. */
+  aabb(mat, x0, y0, z0, x1, y1, z1, opts) {
+    this.box(mat, (x0 + x1) / 2, y0, (z0 + z1) / 2, Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0), 0, opts);
+  }
+
+  /** Arbitrary geometry placed by a full transform. UVs are scaled by su/sv. */
+  shape(mat, geo, position, rotation, scale, opts) {
+    const g = geo.clone();
+    if (opts?.uvScale) scaleUv(g, opts.uvScale[0], opts.uvScale[1]);
+    else g.deleteAttribute('uv1');
+    this._e.set(rotation?.x || 0, rotation?.y || 0, rotation?.z || 0);
+    this._q.setFromEuler(this._e);
+    this._m4.compose(
+      new THREE.Vector3(position.x, position.y, position.z),
+      this._q,
+      new THREE.Vector3(scale?.x ?? 1, scale?.y ?? 1, scale?.z ?? 1),
+    );
+    g.applyMatrix4(this._m4);
+    this._push(mat, g, opts?.collide !== false, position.x, position.z, opts?.hidden === true, opts?.shadow !== false);
+  }
+
+  /**
+   * A four-vertex quad carrying per-vertex greyscale in its `color` attribute.
+   *
+   * This is the grime layer. The material it goes into is multiply-blended, so
+   * a vertex colour of 1 leaves the surface underneath untouched and anything
+   * below 1 darkens it — which is exactly how dirt behaves, and it means a
+   * stain can fade to nothing without a soft-edged alpha texture per stain.
+   * Verts wind p0 -> p1 -> p2 -> p3 around the quad; `cols` are the four
+   * multipliers in the same order. `uvw`/`uvh` are the world sizes the streak
+   * texture should span (v runs p0->p3, i.e. usually downwards).
+   */
+  quad(mat, p0, p1, p2, p3, cols, uvw, uvh) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+      p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], p3[0], p3[1], p3[2],
+    ]), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([
+      0, 0, uvw, 0, uvw, uvh, 0, uvh,
+    ]), 2));
+    const c = new Float32Array(12);
+    for (let i = 0; i < 4; i++) { c[i * 3] = cols[i]; c[i * 3 + 1] = cols[i]; c[i * 3 + 2] = cols[i]; }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.computeVertexNormals();
+    this._push(mat, g, false, p0[0], p0[2], false, false, true);
+  }
+
+  /**
+   * Horizontal quad (floors, road, decals) at height y. `opts.uv` overrides the
+   * world-projected scaling — needed for surfaces like road markings whose
+   * texture is a single non-tiling motif across the U axis.
+   */
+  plane(mat, x, y, z, w, d, rotY = 0, opts) {
+    const tile = mat.userData.tile ?? 2;
+    const g = new THREE.PlaneGeometry(w, d);
+    if (opts?.uv) scaleUv(g, opts.uv[0], opts.uv[1]);
+    else scaleUv(g, w / tile, d / tile);
+    g.rotateX(-Math.PI / 2);
+    if (rotY) g.rotateY(rotY);
+    g.translate(x, y, z);
+    // Horizontal quads are road markings, scorch, gravel yards and paper
+    // scraps. A single-sided flat plane lying on the ground can only ever
+    // shadow itself, so none of them belong in the shadow pass.
+    this._push(mat, g, opts?.collide !== false, x, z, opts?.hidden === true, opts?.shadow === true);
+  }
+
+  /**
+   * Emits everything into `root`, one mesh per bucket. Collidable meshes get
+   * COLLISION_LAYER enabled; non-collidable ones are flagged noCollide.
+   */
+  emit(root, collisionLayer) {
+    let meshes = 0, tris = 0, collidableTris = 0, shadowTris = 0;
+    for (const [key, b] of this.buckets) {
+      if (!b.geos.length) continue;
+      const merged = mergeGeometries(b.geos, false);
+      for (const g of b.geos) g.dispose();
+      if (!merged) { console.warn('merge failed for', key); continue; }
+      merged.computeBoundingSphere();
+      const mesh = new THREE.Mesh(merged, b.mat);
+      mesh.name = key;
+      // Merged geometry does not inherit anything from its inputs, so these two
+      // flags have to be set here or the whole level silently drops out of the
+      // shadow pass. Casting is opt-out rather than blanket-on: ground decals,
+      // the grime layer and the 400-piece rubble scatter would triple the
+      // shadow-pass triangle count to no visible end.
+      mesh.castShadow = b.shadow !== false;
+      mesh.receiveShadow = !b.vc;
+      if (b.collide) mesh.layers.enable(collisionLayer);
+      else mesh.userData.noCollide = true;
+      // Invisible blockers: collision-only volumes that keep the player inside
+      // the level without adding a slab of visible geometry behind the set.
+      if (b.hidden) { mesh.visible = false; mesh.castShadow = false; mesh.receiveShadow = false; }
+      // The grime layer is multiply-blended: it must draw after the opaque set
+      // and must never write depth or occlude anything.
+      if (b.vc) mesh.renderOrder = 2;
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrixWorld();
+      root.add(mesh);
+      meshes++;
+      const t = (merged.index ? merged.index.count : merged.attributes.position.count) / 3;
+      tris += t;
+      if (b.collide) collidableTris += t;
+      if (mesh.castShadow) shadowTris += t;
+    }
+    this.buckets.clear();
+    return { meshes, tris, collidableTris, shadowTris, boxes: this.stats.boxes };
+  }
+}
